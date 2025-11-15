@@ -5,6 +5,9 @@ const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
 const OpenAI = require('openai');
+const { initializeRedis, getRedisClient, closeRedis } = require('./utils/redisClient');
+const sessionManager = require('./utils/sessionManager');
+const roomManager = require('./utils/roomManager');
 
 const app = express();
 const server = http.createServer(app);
@@ -184,6 +187,22 @@ app.post('/api/check-room-name', (req, res) => {
 // Store active rooms and players
 const rooms = new Map();
 const players = new Map();
+
+// Helper function to sync room to Redis
+async function syncRoomToRedis(roomId) {
+  const room = rooms.get(roomId);
+  if (room) {
+    await roomManager.saveRoom(roomId, room);
+  }
+}
+
+// Helper function to sync player to Redis
+async function syncPlayerToRedis(playerId) {
+  const player = players.get(playerId);
+  if (player) {
+    await sessionManager.savePlayer(playerId, player);
+  }
+}
 
 // Bot player names pool
 const BOT_NAMES = [
@@ -789,42 +808,136 @@ This group represents a collective journey toward personal reinvention, with eac
   }
 }
 
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
   const windowSessionId = socket.handshake.query.browserSessionId; // Keep same parameter name for compatibility
   console.log('New client connected:', socket.id, 'Window Session:', windowSessionId);
 
-  // Check if this window session already has a player
-  const existingPlayer = Array.from(players.values()).find(p => p.windowSessionId === windowSessionId);
-  if (existingPlayer && existingPlayer.id !== socket.id) {
-    console.log('🔄 Removing old connection for window session:', windowSessionId, 'Old socket:', existingPlayer.id);
-    // Remove the old player entry
-    players.delete(existingPlayer.id);
-    // Remove from any rooms
-    if (existingPlayer.room) {
-      const room = rooms.get(existingPlayer.room);
+  let playerId;
+  let reconnected = false;
+
+  try {
+    // Get or create persistent player ID
+    playerId = await sessionManager.getOrCreatePlayerId(windowSessionId);
+    console.log(`Player ID for this session: ${playerId}`);
+
+    // Map socket to player
+    await sessionManager.mapSocketToPlayer(socket.id, playerId);
+
+    // Check if this player has existing session data in Redis
+    const existingPlayerData = await sessionManager.getPlayer(playerId);
+
+    if (existingPlayerData && existingPlayerData.currentRoom) {
+      console.log(`🔄 Reconnecting player ${playerId} (${existingPlayerData.name}) to room ${existingPlayerData.currentRoom}`);
+      reconnected = true;
+
+      // Restore player to memory
+      players.set(playerId, {
+        id: playerId,
+        name: existingPlayerData.name,
+        room: existingPlayerData.currentRoom,
+        windowSessionId: windowSessionId,
+        socketId: socket.id,
+        isBot: existingPlayerData.isBot || false
+      });
+
+      // Try to restore room from Redis
+      let room = rooms.get(existingPlayerData.currentRoom);
+      if (!room) {
+        // Room not in memory, try loading from Redis
+        room = await roomManager.getRoom(existingPlayerData.currentRoom);
+        if (room) {
+          rooms.set(existingPlayerData.currentRoom, room);
+          console.log(`📥 Loaded room ${existingPlayerData.currentRoom} from Redis`);
+        }
+      }
+
       if (room) {
-        room.players = room.players.filter(id => id !== existingPlayer.id);
-        if (room.players.length === 0) {
-          console.log('🗑️ Deleting empty room:', existingPlayer.room, `"${room.name}" is now available again`);
-          rooms.delete(existingPlayer.room);
+        // Update room with new socket connection
+        if (!room.players.includes(playerId)) {
+          room.players.push(playerId);
+        }
+
+        // Join socket.io room
+        socket.join(existingPlayerData.currentRoom);
+
+        // Send reconnection confirmation to client
+        socket.emit('reconnected', {
+          playerId: playerId,
+          playerName: existingPlayerData.name,
+          room: {
+            ...room,
+            playerNames: room.players.map(pid => {
+              const p = players.get(pid);
+              return {
+                id: pid,
+                name: p ? p.name : 'Unknown',
+                isBot: p ? p.isBot : false
+              };
+            })
+          }
+        });
+
+        // Notify other players in room about reconnection
+        socket.to(existingPlayerData.currentRoom).emit('player-reconnected', {
+          playerId: playerId,
+          playerName: existingPlayerData.name
+        });
+
+        // Sync updated room to Redis
+        await syncRoomToRedis(existingPlayerData.currentRoom);
+
+        console.log(`✅ Player ${existingPlayerData.name} successfully reconnected to room ${existingPlayerData.currentRoom}`);
+      } else {
+        console.log(`⚠️ Room ${existingPlayerData.currentRoom} not found, clearing player's room association`);
+        const player = players.get(playerId);
+        if (player) {
+          player.room = null;
+          await syncPlayerToRedis(playerId);
         }
       }
     }
+
+    // Check if this window session already has a different socket connection
+    const existingPlayer = Array.from(players.values()).find(p =>
+      p.windowSessionId === windowSessionId && p.id !== playerId
+    );
+    if (existingPlayer) {
+      console.log('🔄 Removing old connection for window session:', windowSessionId, 'Old player:', existingPlayer.id);
+      players.delete(existingPlayer.id);
+      if (existingPlayer.room) {
+        const room = rooms.get(existingPlayer.room);
+        if (room) {
+          room.players = room.players.filter(id => id !== existingPlayer.id);
+          if (room.players.length === 0) {
+            console.log('🗑️ Deleting empty room:', existingPlayer.room, `"${room.name}" is now available again`);
+            rooms.delete(existingPlayer.room);
+            await roomManager.deleteRoom(existingPlayer.room);
+          } else {
+            await syncRoomToRedis(existingPlayer.room);
+          }
+        }
+      }
+    }
+
+  } catch (error) {
+    console.error('Error during connection setup:', error);
+    playerId = socket.id; // Fallback to socket ID
   }
 
   // Send server session ID and configuration to client for restart detection
   socket.emit('server-session', {
     sessionId: serverSessionId,
-    botsAvailable: BOTS_AVAILABLE
+    botsAvailable: BOTS_AVAILABLE,
+    reconnected: reconnected
   });
 
   // Handle player joining
-  socket.on('join-lobby', (playerData) => {
-    console.log(`🔵 Player joining lobby: ${playerData.name} (Socket: ${socket.id})`);
+  socket.on('join-lobby', async (playerData) => {
+    console.log(`🔵 Player joining lobby: ${playerData.name} (Socket: ${socket.id}, Player: ${playerId})`);
 
     // Check if name is already taken by another player
     const nameInUse = Array.from(players.values()).find(p =>
-      p.name.toLowerCase() === playerData.name.toLowerCase() && p.id !== socket.id
+      p.name.toLowerCase() === playerData.name.toLowerCase() && p.id !== playerId
     );
 
     if (nameInUse) {
@@ -836,27 +949,34 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const existingPlayer = players.get(socket.id);
+    const existingPlayer = players.get(playerId);
     if (existingPlayer) {
       console.log(`🔄 Player already in lobby, updating info: ${playerData.name}`);
       // Update existing player info
       existingPlayer.name = playerData.name;
+      existingPlayer.socketId = socket.id;
     } else {
-      // Add new player with window session ID
-      players.set(socket.id, {
-        id: socket.id,
+      // Add new player with persistent ID
+      players.set(playerId, {
+        id: playerId,
         name: playerData.name,
         room: null,
-        windowSessionId: windowSessionId
+        currentRoom: null,
+        windowSessionId: windowSessionId,
+        socketId: socket.id,
+        isBot: false
       });
-      console.log(`✅ New player added to lobby: ${playerData.name} (Window: ${windowSessionId})`);
+      console.log(`✅ New player added to lobby: ${playerData.name} (Player ID: ${playerId})`);
     }
 
+    // Sync player to Redis
+    await syncPlayerToRedis(playerId);
+
     console.log(`📊 Total players in lobby: ${players.size}`);
-    console.log(`👥 Current players:`, Array.from(players.values()).map(p => `${p.name}(${p.id.slice(-4)})`));
+    console.log(`👥 Current players:`, Array.from(players.values()).map(p => `${p.name}(${p.id.slice(0, 8)}...)`));
 
     socket.emit('lobby-joined', {
-      playerId: socket.id,
+      playerId: playerId,
       rooms: Array.from(rooms.values())
     });
 
@@ -865,7 +985,7 @@ io.on('connection', (socket) => {
   });
 
   // Handle room creation
-  socket.on('create-room', (roomData) => {
+  socket.on('create-room', async (roomData) => {
     console.log('Creating room:', roomData);
 
     // Validate room data
@@ -892,15 +1012,15 @@ io.on('connection', (socket) => {
     }
 
     const roomId = Date.now().toString();
-    const player = players.get(socket.id);
+    const player = players.get(playerId);
 
     const room = {
       id: roomId,
       name: roomData.name.trim(),
-      players: [socket.id],
+      players: [playerId],
       maxPlayers: roomData.maxPlayers || 4,
       status: 'waiting',
-      hostId: socket.id,
+      hostId: playerId,
       createdAt: new Date().toISOString()
     };
 
@@ -910,9 +1030,14 @@ io.on('connection', (socket) => {
     // Update player's room
     if (player) {
       player.room = roomId;
+      player.currentRoom = roomId;
+      await syncPlayerToRedis(playerId);
     }
 
-    console.log('Room created successfully:', room.id, 'by player:', socket.id);
+    // Sync room to Redis
+    await syncRoomToRedis(roomId);
+
+    console.log('Room created successfully:', room.id, 'by player:', playerId);
     console.log('Current rooms:', Array.from(rooms.keys()));
 
     // Send room created confirmation to the creator
@@ -926,28 +1051,29 @@ io.on('connection', (socket) => {
   });
 
   // Handle joining a room
-  socket.on('join-room', (roomId) => {
-    console.log(`🎯 Player attempting to join room: ${roomId} (Socket: ${socket.id})`);
+  socket.on('join-room', async (roomId) => {
+    console.log(`🎯 Player attempting to join room: ${roomId} (Player: ${playerId})`);
     console.log(`🏠 Available rooms: [${Array.from(rooms.keys()).join(', ')}]`);
     console.log(`👥 Players in lobby: ${players.size}`);
 
     // Check if player exists in players map, if not, they need to join lobby first
-    if (!players.has(socket.id)) {
-      console.log(`❌ Player ${socket.id} not in lobby, cannot join room`);
-      console.log(`📋 Current lobby players:`, Array.from(players.keys()).map(id => id.slice(-4)));
+    if (!players.has(playerId)) {
+      console.log(`❌ Player ${playerId} not in lobby, cannot join room`);
+      console.log(`📋 Current lobby players:`, Array.from(players.keys()).map(id => id.slice(0, 8)));
       socket.emit('join-room-error', 'You must join the lobby first. Please refresh the page.');
       return;
     }
 
-    const player = players.get(socket.id);
-    console.log(`✅ Player found in lobby: ${player.name} (${socket.id.slice(-4)})`);
+    const player = players.get(playerId);
+    console.log(`✅ Player found in lobby: ${player.name} (${playerId.slice(0, 8)})`);
 
     // If player is already in a room, remove them from the old room first
-    if (player.room) {
+    if (player.room && player.room !== roomId) {
       const oldRoom = rooms.get(player.room);
       if (oldRoom) {
-        oldRoom.players = oldRoom.players.filter(id => id !== socket.id);
+        oldRoom.players = oldRoom.players.filter(id => id !== playerId);
         console.log(`🚪 Removed player from old room: ${oldRoom.name}`);
+        await syncRoomToRedis(player.room);
       }
     }
 
@@ -962,15 +1088,18 @@ io.on('connection', (socket) => {
     console.log('Room found:', room.name, 'Current players:', room.players.length, 'Max players:', room.maxPlayers);
 
     // Check if player is already in this room
-    if (room.players.includes(socket.id)) {
-      console.log('Player already in room:', socket.id);
+    if (room.players.includes(playerId)) {
+      console.log('Player already in room:', playerId);
+
+      // Join socket.io room
+      socket.join(roomId);
 
       // Create room data with player names and finished players
       const roomWithPlayerNames = {
         ...room,
-        playerNames: room.players.map(playerId => {
-          const p = players.get(playerId);
-          return { id: playerId, name: p ? p.name : 'Unknown' };
+        playerNames: room.players.map(pid => {
+          const p = players.get(pid);
+          return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
         }),
         finishedPlayers: room.finishedPlayers || []
       };
@@ -994,22 +1123,27 @@ io.on('connection', (socket) => {
     }
 
     // Add player to room
-    room.players.push(socket.id);
+    room.players.push(playerId);
     socket.join(roomId);
 
     // Update player's room
     if (player) {
       player.room = roomId;
+      player.currentRoom = roomId;
+      await syncPlayerToRedis(playerId);
     }
 
-    console.log('Player joined room successfully:', socket.id, 'Room:', roomId, 'New player count:', room.players.length);
+    // Sync room to Redis
+    await syncRoomToRedis(roomId);
+
+    console.log('Player joined room successfully:', playerId, 'Room:', roomId, 'New player count:', room.players.length);
 
     // Create room data with player names and finished players
     const roomWithPlayerNames = {
       ...room,
-      playerNames: room.players.map(playerId => {
-        const p = players.get(playerId);
-        return { id: playerId, name: p ? p.name : 'Unknown' };
+      playerNames: room.players.map(pid => {
+        const p = players.get(pid);
+        return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
       }),
       finishedPlayers: room.finishedPlayers || []
     };
@@ -1019,7 +1153,7 @@ io.on('connection', (socket) => {
 
     // Notify all players in the room about the new player
     io.to(roomId).emit('player-joined-room', {
-      playerId: socket.id,
+      playerId: playerId,
       room: roomWithPlayerNames
     });
 
@@ -1535,55 +1669,63 @@ io.on('connection', (socket) => {
   });
 
   // Handle disconnect
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     console.log('Client disconnected:', socket.id);
 
-    const player = players.get(socket.id);
-    if (player) {
-      console.log(`🔌 Player ${player.name} (${socket.id.slice(-4)}) disconnected`);
+    try {
+      // Get player ID from socket mapping
+      const disconnectedPlayerId = await sessionManager.getPlayerIdBySocket(socket.id);
 
-      if (player.room) {
-        const room = rooms.get(player.room);
-        if (room) {
-          // Remove player from room
-          room.players = room.players.filter(id => id !== socket.id);
-          console.log(`📤 Removed ${player.name} from room "${room.name}". Remaining players: ${room.players.length}`);
-
-          // Notify other players in the room about the disconnection
-          if (room.players.length > 0) {
-            io.to(player.room).emit('player-left-room', {
-              playerId: socket.id,
-              playerName: player.name,
-              room: {
-                ...room,
-                playerNames: room.players.map(playerId => {
-                  const p = players.get(playerId);
-                  return { id: playerId, name: p ? p.name : 'Unknown' };
-                })
-              },
-              reason: 'disconnected'
-            });
-          }
-
-          // If room is now empty, delete it
-          if (room.players.length === 0) {
-            console.log(`🗑️ Deleting empty room: ${player.room} "${room.name}" is now available again`);
-            rooms.delete(player.room);
-          }
-
-          // Broadcast updated room list
-          io.emit('room-list-updated', Array.from(rooms.values()));
-        }
+      if (!disconnectedPlayerId) {
+        console.log(`⚠️ Disconnected socket ${socket.id} has no player mapping`);
+        return;
       }
 
-      // Remove player from players map
-      players.delete(socket.id);
-      console.log(`👥 Total players remaining: ${players.size}`);
+      const player = players.get(disconnectedPlayerId);
+      if (player) {
+        console.log(`🔌 Player ${player.name} (${disconnectedPlayerId.slice(0, 8)}...) disconnected`);
 
-      // Broadcast updated player list
-      io.emit('player-list-updated', Array.from(players.values()));
-    } else {
-      console.log(`⚠️ Disconnected client ${socket.id} was not found in players map`);
+        // Mark player as disconnected in Redis with TTL
+        await sessionManager.markPlayerDisconnected(disconnectedPlayerId);
+
+        if (player.room) {
+          const room = rooms.get(player.room);
+          if (room) {
+            // Don't remove player from room immediately - they might reconnect
+            console.log(`⏳ Player ${player.name} temporarily disconnected from room "${room.name}". Waiting for reconnection...`);
+
+            // Notify other players in the room about the disconnection
+            if (room.players.length > 0) {
+              socket.to(player.room).emit('player-disconnected', {
+                playerId: disconnectedPlayerId,
+                playerName: player.name,
+                temporary: true,
+                room: {
+                  ...room,
+                  playerNames: room.players.map(pid => {
+                    const p = players.get(pid);
+                    return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
+                  })
+                }
+              });
+            }
+
+            // Sync room state to Redis
+            await syncRoomToRedis(player.room);
+          }
+        }
+
+        // Keep player in memory for now (Redis TTL will handle cleanup)
+        console.log(`👥 Total players in memory: ${players.size} (player kept for potential reconnection)`);
+
+        // Delete socket mapping
+        await sessionManager.deleteSocketMapping(socket.id);
+
+      } else {
+        console.log(`⚠️ Disconnected player ${disconnectedPlayerId} was not found in players map`);
+      }
+    } catch (error) {
+      console.error('Error handling disconnect:', error);
     }
   });
 });
@@ -1599,10 +1741,60 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 const PORT = process.env.PORT || process.env.SERVER_PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  if (process.env.NODE_ENV === 'production') {
-    console.log(`Serving React app from: ${path.join(__dirname, '../build')}`);
+
+// Initialize Redis and start server
+async function startServer() {
+  try {
+    // Initialize Redis connection
+    await initializeRedis();
+    console.log('✅ Redis initialized successfully');
+
+    // Try to load any existing rooms from Redis
+    try {
+      const savedRooms = await roomManager.loadAllRooms();
+      if (savedRooms.size > 0) {
+        // Merge saved rooms into memory
+        for (const [roomId, roomData] of savedRooms.entries()) {
+          rooms.set(roomId, roomData);
+        }
+        console.log(`📥 Restored ${savedRooms.size} rooms from Redis`);
+      }
+    } catch (error) {
+      console.log('ℹ️ No existing rooms to restore:', error.message);
+    }
+
+    // Start HTTP server
+    server.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+      console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+      if (process.env.NODE_ENV === 'production') {
+        console.log(`Serving React app from: ${path.join(__dirname, '../build')}`);
+      }
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
   }
+}
+
+// Handle graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, shutting down gracefully...');
+  await closeRedis();
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
 });
+
+process.on('SIGINT', async () => {
+  console.log('\nSIGINT received, shutting down gracefully...');
+  await closeRedis();
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
+
+// Start the server
+startServer();
