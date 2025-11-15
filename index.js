@@ -206,8 +206,7 @@ async function syncPlayerToRedis(playerId) {
 
 // Bot player names pool
 const BOT_NAMES = [
-  'BotAlex', 'BotSamantha', 'BotJorge', 'BotEmily', 'BotFede',
-  'BotTaylor', 'BotCasey', 'BotMorgan', 'BotAvery', 'BotRiley'
+  'BotAlex', 'BotSamantha', 'BotJorge', 'BotEmily', 'BotFede'
 ];
 
 // Track bot IDs
@@ -1165,9 +1164,9 @@ io.on('connection', async (socket) => {
   });
 
   // Handle game start
-  socket.on('start-game', (roomId) => {
+  socket.on('start-game', async (roomId) => {
     const room = rooms.get(roomId);
-    if (room && room.players.includes(socket.id)) {
+    if (room && room.players.includes(playerId)) {
       room.status = 'playing';
       room.conversations = new Map(); // Track individual conversations
       room.finishedPlayers = []; // Track who has finished their conversation
@@ -1179,10 +1178,10 @@ io.on('connection', async (socket) => {
       room.drawnCards = []; // Track cards that have been drawn
 
       // Get player names for turn order display
-      const turnOrderWithNames = room.turnOrder.map(playerId => {
-        const player = players.get(playerId);
+      const turnOrderWithNames = room.turnOrder.map(pid => {
+        const player = players.get(pid);
         return {
-          id: playerId,
+          id: pid,
           name: player ? player.name : 'Unknown',
           isBot: player ? player.isBot : false
         };
@@ -1195,11 +1194,14 @@ io.on('connection', async (socket) => {
         deckSize: room.deck.length
       });
 
+      // Sync room to Redis
+      await syncRoomToRedis(roomId);
+
       // Start bot conversations automatically
-      room.players.forEach(playerId => {
-        const player = players.get(playerId);
+      room.players.forEach(pid => {
+        const player = players.get(pid);
         if (player && player.isBot) {
-          simulateBotConversation(roomId, playerId, player.name);
+          simulateBotConversation(roomId, pid, player.name);
         }
       });
     }
@@ -1611,12 +1613,12 @@ io.on('connection', async (socket) => {
   });
 
   // Handle explicit room leaving
-  socket.on('leave-room', (roomId) => {
-    console.log(`🚪 Player ${socket.id} explicitly leaving room: ${roomId}`);
+  socket.on('leave-room', async (roomId) => {
+    console.log(`🚪 Player ${playerId} explicitly leaving room: ${roomId}`);
 
-    const player = players.get(socket.id);
+    const player = players.get(playerId);
     if (!player) {
-      console.log(`❌ Player ${socket.id} not found in players map`);
+      console.log(`❌ Player ${playerId} not found in players map`);
       return;
     }
 
@@ -1627,24 +1629,26 @@ io.on('connection', async (socket) => {
     }
 
     // Remove player from room
-    room.players = room.players.filter(id => id !== socket.id);
+    room.players = room.players.filter(id => id !== playerId);
     socket.leave(room.id);
 
     // Update player's room status (return to lobby)
     player.room = null;
+    player.currentRoom = null;
+    await syncPlayerToRedis(playerId);
 
     console.log(`✅ Player ${player.name} left room ${room.name}. Remaining players: ${room.players.length}`);
 
     // Notify other players in the room about the departure
     if (room.players.length > 0) {
       io.to(room.id).emit('player-left-room', {
-        playerId: socket.id,
+        playerId: playerId,
         playerName: player.name,
         room: {
           ...room,
-          playerNames: room.players.map(playerId => {
-            const p = players.get(playerId);
-            return { id: playerId, name: p ? p.name : 'Unknown' };
+          playerNames: room.players.map(pid => {
+            const p = players.get(pid);
+            return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
           })
         }
       });
@@ -1654,6 +1658,9 @@ io.on('connection', async (socket) => {
     if (room.players.length === 0) {
       console.log(`🗑️ Deleting empty room: ${room.id} "${room.name}" is now available again`);
       rooms.delete(room.id);
+      await roomManager.deleteRoom(room.id);
+    } else {
+      await syncRoomToRedis(room.id);
     }
 
     // Broadcast updated room and player lists
