@@ -199,6 +199,61 @@ const BOTS_AVAILABLE = process.env.BOTS_AVAILABLE === 'false';
 
 console.log(`🤖 Bot players are ${BOTS_AVAILABLE ? 'ENABLED' : 'DISABLED'}`);
 
+// Card types for the deck
+const CARD_TYPES = ['Inflection Point', 'Insight', 'Reflection'];
+
+// Game configuration for card distribution
+// You can adjust these numbers to control how often each card appears in the deck
+const CARD_CONFIG = {
+  'Inflection Point': 10,  // Number of Inflection Point cards in deck
+  'Insight': 10,           // Number of Insight cards in deck
+  'Reflection': 10         // Number of Reflection cards in deck
+};
+
+// Function to create and shuffle a card deck
+function createDeck(customConfig = null) {
+  const config = customConfig || CARD_CONFIG;
+
+  // Create a deck with configured quantities for each card type
+  const deck = [];
+  CARD_TYPES.forEach(cardType => {
+    const count = config[cardType] || 10; // Default to 10 if not specified
+    for (let i = 0; i < count; i++) {
+      deck.push({
+        id: `${cardType.toLowerCase().replace(/\s+/g, '-')}-${i}`,
+        type: cardType,
+        // Placeholder for future card content
+        content: {
+          front: `This is a ${cardType} card`, // Placeholder text
+          imageBack: null // Will be used for card back image in the future
+        }
+      });
+    }
+  });
+
+  // Shuffle the deck using Fisher-Yates algorithm
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+
+  console.log(`🃏 Created deck with ${deck.length} cards:`,
+    CARD_TYPES.map(type => `${type}: ${config[type] || 10}`).join(', '));
+
+  return deck;
+}
+
+// Function to randomly assign turn order
+function assignTurnOrder(playerIds) {
+  const shuffled = [...playerIds];
+  // Fisher-Yates shuffle
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
 // Function to generate a unique bot ID
 function generateBotId() {
   return `bot_${Date.now()}_${Math.random().toString(36).substring(7)}`;
@@ -982,7 +1037,29 @@ io.on('connection', (socket) => {
       room.status = 'playing';
       room.conversations = new Map(); // Track individual conversations
       room.finishedPlayers = []; // Track who has finished their conversation
-      io.to(roomId).emit('game-started', room);
+
+      // Initialize turn system
+      room.turnOrder = assignTurnOrder(room.players);
+      room.currentTurnIndex = 0;
+      room.deck = createDeck();
+      room.drawnCards = []; // Track cards that have been drawn
+
+      // Get player names for turn order display
+      const turnOrderWithNames = room.turnOrder.map(playerId => {
+        const player = players.get(playerId);
+        return {
+          id: playerId,
+          name: player ? player.name : 'Unknown',
+          isBot: player ? player.isBot : false
+        };
+      });
+
+      io.to(roomId).emit('game-started', {
+        ...room,
+        turnOrder: turnOrderWithNames,
+        currentPlayerId: room.turnOrder[0],
+        deckSize: room.deck.length
+      });
 
       // Start bot conversations automatically
       room.players.forEach(playerId => {
@@ -992,6 +1069,76 @@ io.on('connection', (socket) => {
         }
       });
     }
+  });
+
+  // Handle drawing a card
+  socket.on('draw-card', (data) => {
+    const { roomId, playerId } = data;
+    const room = rooms.get(roomId);
+
+    if (!room) {
+      socket.emit('draw-card-error', 'Room not found');
+      return;
+    }
+
+    // Verify it's the player's turn
+    const currentPlayer = room.turnOrder[room.currentTurnIndex];
+    if (currentPlayer !== playerId) {
+      socket.emit('draw-card-error', 'Not your turn');
+      return;
+    }
+
+    // Check if deck is empty
+    if (room.deck.length === 0) {
+      socket.emit('draw-card-error', 'Deck is empty');
+      return;
+    }
+
+    // Draw the top card
+    const drawnCard = room.deck.pop();
+    room.drawnCards.push({
+      ...drawnCard,
+      drawnBy: playerId,
+      timestamp: new Date().toISOString()
+    });
+
+    const player = players.get(playerId);
+    console.log(`🃏 ${player ? player.name : 'Unknown'} drew a ${drawnCard.type} card`);
+
+    // Broadcast the drawn card to all players in the room
+    io.to(roomId).emit('card-drawn', {
+      card: drawnCard,
+      playerId: playerId,
+      playerName: player ? player.name : 'Unknown',
+      deckSize: room.deck.length,
+      isBot: player ? player.isBot : false
+    });
+  });
+
+  // Handle advancing to next turn
+  socket.on('next-turn', (data) => {
+    const { roomId } = data;
+    const room = rooms.get(roomId);
+
+    if (!room) {
+      socket.emit('next-turn-error', 'Room not found');
+      return;
+    }
+
+    // Advance to next turn
+    room.currentTurnIndex = (room.currentTurnIndex + 1) % room.turnOrder.length;
+    const nextPlayerId = room.turnOrder[room.currentTurnIndex];
+    const nextPlayer = players.get(nextPlayerId);
+
+    console.log(`➡️ Turn advanced to ${nextPlayer ? nextPlayer.name : 'Unknown'}`);
+
+    // Broadcast turn change to all players
+    io.to(roomId).emit('turn-changed', {
+      currentPlayerId: nextPlayerId,
+      currentPlayerName: nextPlayer ? nextPlayer.name : 'Unknown',
+      isBot: nextPlayer ? nextPlayer.isBot : false,
+      turnIndex: room.currentTurnIndex
+    });
   });
 
   // Handle adding a bot to a room
