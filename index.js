@@ -1103,7 +1103,10 @@ io.on('connection', async (socket) => {
         finishedPlayers: room.finishedPlayers || []
       };
 
-      socket.emit('room-joined', roomWithPlayerNames);
+      socket.emit('room-joined', {
+        ...roomWithPlayerNames,
+        playerId: playerId  // Add persistent player ID
+      });
       return;
     }
 
@@ -1148,7 +1151,10 @@ io.on('connection', async (socket) => {
     };
 
     // Notify the player they joined successfully
-    socket.emit('room-joined', roomWithPlayerNames);
+    socket.emit('room-joined', {
+      ...roomWithPlayerNames,
+      playerId: playerId  // Add persistent player ID
+    });
 
     // Notify all players in the room about the new player
     io.to(roomId).emit('player-joined-room', {
