@@ -99,6 +99,14 @@ app.get('/admin/stats', (req, res) => {
   });
 });
 
+// Endpoint to check server configuration
+app.get('/api/server-config', (req, res) => {
+  res.json({
+    botsAvailable: BOTS_AVAILABLE,
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
 // Check if a player name is available
 app.post('/api/check-name', (req, res) => {
   const { name } = req.body;
@@ -185,6 +193,11 @@ const BOT_NAMES = [
 
 // Track bot IDs
 const bots = new Set();
+
+// Bot availability configuration from environment
+const BOTS_AVAILABLE = process.env.BOTS_AVAILABLE === 'false';
+
+console.log(`🤖 Bot players are ${BOTS_AVAILABLE ? 'ENABLED' : 'DISABLED'}`);
 
 // Function to generate a unique bot ID
 function generateBotId() {
@@ -744,8 +757,11 @@ io.on('connection', (socket) => {
     }
   }
 
-  // Send server session ID to client for restart detection
-  socket.emit('server-session', { sessionId: serverSessionId });
+  // Send server session ID and configuration to client for restart detection
+  socket.emit('server-session', {
+    sessionId: serverSessionId,
+    botsAvailable: BOTS_AVAILABLE
+  });
 
   // Handle player joining
   socket.on('join-lobby', (playerData) => {
@@ -982,6 +998,13 @@ io.on('connection', (socket) => {
   socket.on('add-bot', (roomId) => {
     console.log(`🤖 Request to add bot to room ${roomId}`);
 
+    // Check if bots are enabled
+    if (!BOTS_AVAILABLE) {
+      console.log('❌ Bot addition blocked - bots are disabled in server configuration');
+      socket.emit('bot-add-error', 'Bot players are currently disabled on this server');
+      return;
+    }
+
     const result = addBotToRoom(roomId);
 
     if (result.success) {
@@ -1018,6 +1041,13 @@ io.on('connection', (socket) => {
   // Handle removing a bot from a room
   socket.on('remove-bot', (data) => {
     console.log(`🤖 Request to remove bot ${data.botId} from room ${data.roomId}`);
+
+    // Check if bots are enabled
+    if (!BOTS_AVAILABLE) {
+      console.log('❌ Bot removal blocked - bots are disabled in server configuration');
+      socket.emit('bot-remove-error', 'Bot players are currently disabled on this server');
+      return;
+    }
 
     const result = removeBotFromRoom(data.roomId, data.botId);
 
