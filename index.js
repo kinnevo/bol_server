@@ -192,7 +192,19 @@ const players = new Map();
 async function syncRoomToRedis(roomId) {
   const room = rooms.get(roomId);
   if (room) {
-    await roomManager.saveRoom(roomId, room);
+    // Build playerNames array with current player data before saving
+    const roomToSave = {
+      ...room,
+      playerNames: room.players.map(pid => {
+        const p = players.get(pid);
+        return {
+          id: pid,
+          name: p ? p.name : 'Unknown',
+          isBot: p ? p.isBot : false
+        };
+      })
+    };
+    await roomManager.saveRoom(roomId, roomToSave);
   }
 }
 
@@ -860,19 +872,37 @@ io.on('connection', async (socket) => {
         socket.join(existingPlayerData.currentRoom);
 
         // Send reconnection confirmation to client
+        // Build enriched room data with player names and turn order
+        const playerNames = room.players.map(pid => {
+          const p = players.get(pid);
+          return {
+            id: pid,
+            name: p ? p.name : 'Unknown',
+            isBot: p ? p.isBot : false
+          };
+        });
+
+        // Build enriched turn order if game is playing
+        let turnOrderWithNames = room.turnOrder;
+        if (room.status === 'playing' && room.turnOrder) {
+          turnOrderWithNames = room.turnOrder.map(pid => {
+            const p = players.get(pid);
+            return {
+              id: pid,
+              name: p ? p.name : 'Unknown',
+              isBot: p ? p.isBot : false
+            };
+          });
+        }
+
         socket.emit('reconnected', {
           playerId: playerId,
           playerName: existingPlayerData.name,
           room: {
             ...room,
-            playerNames: room.players.map(pid => {
-              const p = players.get(pid);
-              return {
-                id: pid,
-                name: p ? p.name : 'Unknown',
-                isBot: p ? p.isBot : false
-              };
-            })
+            playerNames: playerNames,
+            turnOrder: turnOrderWithNames,
+            currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null
           }
         });
 
@@ -1094,13 +1124,30 @@ io.on('connection', async (socket) => {
       socket.join(roomId);
 
       // Create room data with player names and finished players
+      const playerNames = room.players.map(pid => {
+        const p = players.get(pid);
+        return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
+      });
+
+      // Build enriched turn order if game is playing
+      let turnOrderWithNames = room.turnOrder;
+      if (room.status === 'playing' && room.turnOrder) {
+        turnOrderWithNames = room.turnOrder.map(pid => {
+          const p = players.get(pid);
+          return {
+            id: pid,
+            name: p ? p.name : 'Unknown',
+            isBot: p ? p.isBot : false
+          };
+        });
+      }
+
       const roomWithPlayerNames = {
         ...room,
-        playerNames: room.players.map(pid => {
-          const p = players.get(pid);
-          return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
-        }),
-        finishedPlayers: room.finishedPlayers || []
+        playerNames: playerNames,
+        turnOrder: turnOrderWithNames,
+        finishedPlayers: room.finishedPlayers || [],
+        currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null
       };
 
       socket.emit('room-joined', {
@@ -1141,13 +1188,30 @@ io.on('connection', async (socket) => {
     console.log('Player joined room successfully:', playerId, 'Room:', roomId, 'New player count:', room.players.length);
 
     // Create room data with player names and finished players
+    const playerNames = room.players.map(pid => {
+      const p = players.get(pid);
+      return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
+    });
+
+    // Build enriched turn order if game is playing
+    let turnOrderWithNames = room.turnOrder;
+    if (room.status === 'playing' && room.turnOrder) {
+      turnOrderWithNames = room.turnOrder.map(pid => {
+        const p = players.get(pid);
+        return {
+          id: pid,
+          name: p ? p.name : 'Unknown',
+          isBot: p ? p.isBot : false
+        };
+      });
+    }
+
     const roomWithPlayerNames = {
       ...room,
-      playerNames: room.players.map(pid => {
-        const p = players.get(pid);
-        return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
-      }),
-      finishedPlayers: room.finishedPlayers || []
+      playerNames: playerNames,
+      turnOrder: turnOrderWithNames,
+      finishedPlayers: room.finishedPlayers || [],
+      currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null
     };
 
     // Notify the player they joined successfully
@@ -1284,7 +1348,7 @@ io.on('connection', async (socket) => {
   });
 
   // Handle adding a bot to a room
-  socket.on('add-bot', (roomId) => {
+  socket.on('add-bot', async (roomId) => {
     console.log(`🤖 Request to add bot to room ${roomId}`);
 
     // Check if bots are enabled
@@ -1299,12 +1363,18 @@ io.on('connection', async (socket) => {
     if (result.success) {
       const room = result.room;
 
+      // Sync bot player to Redis
+      await syncPlayerToRedis(result.bot.id);
+
+      // Sync room to Redis
+      await syncRoomToRedis(roomId);
+
       // Create room data with player names
       const roomWithPlayerNames = {
         ...room,
-        playerNames: room.players.map(playerId => {
-          const p = players.get(playerId);
-          return { id: playerId, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
+        playerNames: room.players.map(pid => {
+          const p = players.get(pid);
+          return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
         }),
         finishedPlayers: room.finishedPlayers || []
       };
@@ -1766,8 +1836,27 @@ async function startServer() {
     try {
       const savedRooms = await roomManager.loadAllRooms();
       if (savedRooms.size > 0) {
-        // Merge saved rooms into memory
+        // Merge saved rooms into memory and restore bot players
         for (const [roomId, roomData] of savedRooms.entries()) {
+          // Restore bot players to the players Map first
+          if (roomData.playerNames && Array.isArray(roomData.playerNames)) {
+            for (const playerInfo of roomData.playerNames) {
+              // Check if this is a bot
+              if (playerInfo.isBot || playerInfo.id.startsWith('bot_')) {
+                players.set(playerInfo.id, {
+                  id: playerInfo.id,
+                  name: playerInfo.name,
+                  room: roomId,
+                  isBot: true,
+                  windowSessionId: `bot_session_${playerInfo.id}`
+                });
+                bots.add(playerInfo.id);
+                console.log(`🤖 Restored bot ${playerInfo.name} (${playerInfo.id}) to room ${roomData.name}`);
+              }
+            }
+          }
+
+          // Now set the room with updated playerNames
           rooms.set(roomId, roomData);
         }
         console.log(`📥 Restored ${savedRooms.size} rooms from Redis`);
