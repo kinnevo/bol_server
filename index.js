@@ -195,7 +195,7 @@ const BOT_NAMES = [
 const bots = new Set();
 
 // Bot availability configuration from environment
-const BOTS_AVAILABLE = process.env.BOTS_AVAILABLE === 'false';
+const BOTS_AVAILABLE = process.env.BOTS_AVAILABLE === 'true';
 
 console.log(`🤖 Bot players are ${BOTS_AVAILABLE ? 'ENABLED' : 'DISABLED'}`);
 
