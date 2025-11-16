@@ -13,11 +13,13 @@ Backend server for the BOL multiplayer game with WebSocket support and OpenAI in
 ## Environment Setup
 
 1. Copy the example environment file:
+
 ```bash
 cp env.example .env
 ```
 
 2. Add your OpenAI API key to the `.env` file:
+
 ```
 OPENAI_API_KEY=your_actual_openai_api_key_here
 NODE_ENV=development
@@ -52,6 +54,7 @@ npm start
 ## WebSocket Events
 
 The server handles various Socket.IO events for real-time game functionality:
+
 - Room creation and joining
 - Player management
 - Game state synchronization
@@ -61,3 +64,7 @@ The server handles various Socket.IO events for real-time game functionality:
 ## Deployment
 
 This server is configured for Railway deployment. The `railway.toml` file contains the deployment configuration.
+
+## Game Mechains
+
+Card amount and types can be specitied at: ./index.js
