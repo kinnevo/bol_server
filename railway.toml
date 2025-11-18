@@ -5,7 +5,7 @@ builder = "NIXPACKS"
 NODE_ENV = "production"
 
 [deploy]
-startCommand = "npm start"
+startCommand = "npm run migrate:up && npm start"
 healthcheckPath = "/debug/rooms"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
