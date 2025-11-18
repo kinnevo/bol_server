@@ -5,9 +5,12 @@ const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
 const OpenAI = require('openai');
+const { v4: uuidv4 } = require('uuid');
 const { initializeRedis, getRedisClient, closeRedis } = require('./utils/redisClient');
 const sessionManager = require('./utils/sessionManager');
 const roomManager = require('./utils/roomManager');
+const { createDailyRoom, deleteDailyRoom, getDailyTranscripts, startRecording } = require('./utils/dailyManager');
+const { createGameSession, endGameSession, saveTranscripts, getSessionByRoomId } = require('./utils/dbClient');
 
 const app = express();
 const server = http.createServer(app);
@@ -1257,11 +1260,57 @@ io.on('connection', async (socket) => {
         };
       });
 
+      // Create Daily.co voice chat room
+      let dailyRoomData = null;
+      let sessionId = uuidv4();
+
+      try {
+        const playersList = room.players.map(pid => {
+          const player = players.get(pid);
+          return {
+            id: pid,
+            name: player ? player.name : 'Unknown',
+            isBot: player ? player.isBot : false
+          };
+        });
+
+        // Only create Daily room for non-bot players
+        const humanPlayers = playersList.filter(p => !p.isBot);
+
+        if (humanPlayers.length > 0) {
+          dailyRoomData = await createDailyRoom(roomId, playersList);
+          room.dailyRoomUrl = dailyRoomData.url;
+          room.dailyRoomName = dailyRoomData.name;
+          room.sessionId = sessionId;
+
+          console.log(`[Voice Chat] Created Daily room for game: ${roomId}`);
+
+          // Create game session in database
+          await createGameSession({
+            id: sessionId,
+            roomId: roomId,
+            roomName: room.name,
+            dailyRoomName: dailyRoomData.name,
+            dailyRoomUrl: dailyRoomData.url,
+            playerCount: room.players.length,
+          });
+
+          console.log(`[DB] Created game session: ${sessionId}`);
+        }
+      } catch (error) {
+        console.error('[Voice Chat] Error creating Daily room:', error);
+        // Continue without voice chat if creation fails
+      }
+
       io.to(roomId).emit('game-started', {
         ...room,
         turnOrder: turnOrderWithNames,
         currentPlayerId: room.turnOrder[0],
-        deckSize: room.deck.length
+        deckSize: room.deck.length,
+        voiceChat: dailyRoomData ? {
+          url: dailyRoomData.url,
+          roomName: dailyRoomData.name,
+        } : null,
       });
 
       // Sync room to Redis
@@ -1679,6 +1728,44 @@ io.on('connection', async (socket) => {
         // Send group summary to all players in the room
         io.to(data.roomId).emit('group-summary-generated', groupSummary);
         console.log(`✅ Group summary sent to all players in room ${data.roomId}`);
+
+        // Mark game session as completed in database
+        if (room.sessionId) {
+          try {
+            await endGameSession(room.sessionId, 'completed');
+            console.log(`[DB] Game session ended: ${room.sessionId}`);
+          } catch (error) {
+            console.error('[DB] Error ending game session:', error);
+          }
+        }
+
+        // Schedule transcript retrieval (Daily needs time to process)
+        if (room.dailyRoomName) {
+          console.log(`[Voice Chat] Scheduling transcript retrieval for room: ${room.dailyRoomName}`);
+
+          setTimeout(async () => {
+            try {
+              const transcripts = await getDailyTranscripts(room.dailyRoomName);
+
+              if (transcripts && transcripts.length > 0 && room.sessionId) {
+                await saveTranscripts(room.sessionId, transcripts);
+                console.log(`[Voice Chat] Saved ${transcripts.length} transcripts for session: ${room.sessionId}`);
+
+                // Notify players that transcripts are ready
+                io.to(data.roomId).emit('transcripts-ready', {
+                  sessionId: room.sessionId,
+                  count: transcripts.length,
+                });
+              }
+
+              // Clean up Daily room
+              await deleteDailyRoom(room.dailyRoomName);
+              console.log(`[Voice Chat] Deleted Daily room: ${room.dailyRoomName}`);
+            } catch (error) {
+              console.error('[Voice Chat] Error retrieving transcripts:', error);
+            }
+          }, 120000); // Wait 2 minutes for Daily to process transcripts
+        }
       } else {
         socket.emit('group-summary-error', 'Failed to generate group summary');
       }

@@ -3,12 +3,8 @@
  * Handles database connections and queries for voice chat transcripts
  */
 
-import pg from 'pg';
-import dotenv from 'dotenv';
-
-dotenv.config();
-
-const { Pool } = pg;
+const { Pool } = require('pg');
+require('dotenv').config();
 
 // Create a connection pool
 const pool = new Pool({
@@ -30,7 +26,7 @@ pool.on('error', (err) => {
  * @param {Object} sessionData - Session data
  * @returns {Promise<Object>} Created session
  */
-export async function createGameSession(sessionData) {
+async function createGameSession(sessionData) {
   const {
     id,
     roomId,
@@ -73,7 +69,7 @@ export async function createGameSession(sessionData) {
  * @param {string} status - The final status (completed, abandoned)
  * @returns {Promise<Object>} Updated session
  */
-export async function endGameSession(sessionId, status = 'completed') {
+async function endGameSession(sessionId, status = 'completed') {
   const query = `
     UPDATE game_sessions
     SET ended_at = NOW(), status = $1
@@ -97,7 +93,7 @@ export async function endGameSession(sessionId, status = 'completed') {
  * @param {Array} transcripts - Array of transcript objects from Daily.co
  * @returns {Promise<Array>} Saved transcript records
  */
-export async function saveTranscripts(sessionId, transcripts) {
+async function saveTranscripts(sessionId, transcripts) {
   if (!transcripts || transcripts.length === 0) {
     console.log('[DB] No transcripts to save');
     return [];
@@ -143,7 +139,7 @@ export async function saveTranscripts(sessionId, transcripts) {
  * @param {string} sessionId - The session UUID
  * @returns {Promise<Array>} Array of transcript records
  */
-export async function getTranscripts(sessionId) {
+async function getTranscripts(sessionId) {
   const query = `
     SELECT * FROM voice_transcripts
     WHERE session_id = $1
@@ -166,7 +162,7 @@ export async function getTranscripts(sessionId) {
  * @param {Object} analysisResult - The analysis data (will be stored as JSONB)
  * @returns {Promise<Object>} Saved analysis record
  */
-export async function saveAnalysis(sessionId, analysisType, analysisResult) {
+async function saveAnalysis(sessionId, analysisType, analysisResult) {
   const query = `
     INSERT INTO transcript_analysis (session_id, analysis_type, analysis_result)
     VALUES ($1, $2, $3)
@@ -194,7 +190,7 @@ export async function saveAnalysis(sessionId, analysisType, analysisResult) {
  * @param {string} analysisType - Optional: filter by analysis type
  * @returns {Promise<Array>} Array of analysis records
  */
-export async function getAnalysis(sessionId, analysisType = null) {
+async function getAnalysis(sessionId, analysisType = null) {
   let query = `
     SELECT * FROM transcript_analysis
     WHERE session_id = $1
@@ -223,7 +219,7 @@ export async function getAnalysis(sessionId, analysisType = null) {
  * @param {string} roomId - The game room ID
  * @returns {Promise<Object>} Session record
  */
-export async function getSessionByRoomId(roomId) {
+async function getSessionByRoomId(roomId) {
   const query = `
     SELECT * FROM game_sessions
     WHERE room_id = $1
@@ -243,9 +239,19 @@ export async function getSessionByRoomId(roomId) {
 /**
  * Closes the database connection pool
  */
-export async function closePool() {
+async function closePool() {
   await pool.end();
   console.log('[DB] PostgreSQL pool closed');
 }
 
-export default pool;
+module.exports = {
+  pool,
+  createGameSession,
+  endGameSession,
+  saveTranscripts,
+  getTranscripts,
+  saveAnalysis,
+  getAnalysis,
+  getSessionByRoomId,
+  closePool,
+};
