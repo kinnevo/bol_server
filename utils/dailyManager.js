@@ -24,6 +24,11 @@ async function createDailyRoom(roomId, players) {
     throw new Error('DAILY_DOMAIN is not configured in environment variables');
   }
 
+  // Debug logging
+  console.log('[Daily] API Key present:', DAILY_API_KEY ? 'Yes' : 'No');
+  console.log('[Daily] API Key length:', DAILY_API_KEY ? DAILY_API_KEY.length : 0);
+  console.log('[Daily] Domain:', DAILY_DOMAIN);
+
   try {
     const roomName = `bol-game-${roomId}-${Date.now()}`;
 
@@ -36,43 +41,23 @@ async function createDailyRoom(roomId, players) {
       body: JSON.stringify({
         name: roomName,
         properties: {
-          // Enable audio only (no video)
-          enable_video: false,
-          enable_audio: true,
-
-          // Enable recording for transcription
-          enable_recording: 'cloud',
-
-          // Enable transcription
-          enable_transcription: true,
-
           // Room expires after 2 hours
           exp: Math.floor(Date.now() / 1000) + (2 * 60 * 60),
 
           // Max participants based on player count
           max_participants: players.length,
 
-          // Auto-join with audio on
-          start_audio_off: false,
-
-          // Owner only can start recording (set to false for auto-start)
-          owner_only_broadcast: false,
-
-          // Enable chat for backup communication
-          enable_chat: true,
-
-          // Language for transcription (English by default)
-          transcription_settings: {
-            language: 'en',
-            model: 'nova-2',
-            tier: 'standard',
-          },
+          // Enable recording and transcription
+          enable_recording: 'cloud',
+          enable_transcription: true,
         },
       }),
     });
 
     if (!response.ok) {
       const errorData = await response.json();
+      console.error('[Daily] API Error Response:', JSON.stringify(errorData, null, 2));
+      console.error('[Daily] Response Status:', response.status);
       throw new Error(`Failed to create Daily room: ${errorData.error || response.statusText}`);
     }
 

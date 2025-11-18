@@ -1286,16 +1286,21 @@ io.on('connection', async (socket) => {
           console.log(`[Voice Chat] Created Daily room for game: ${roomId}`);
 
           // Create game session in database
-          await createGameSession({
-            id: sessionId,
-            roomId: roomId,
-            roomName: room.name,
-            dailyRoomName: dailyRoomData.name,
-            dailyRoomUrl: dailyRoomData.url,
-            playerCount: room.players.length,
-          });
+          try {
+            await createGameSession({
+              id: sessionId,
+              roomId: roomId,
+              roomName: room.name,
+              dailyRoomName: dailyRoomData.name,
+              dailyRoomUrl: dailyRoomData.url,
+              playerCount: room.players.length,
+            });
 
-          console.log(`[DB] Created game session: ${sessionId}`);
+            console.log(`[DB] Created game session: ${sessionId}`);
+          } catch (dbError) {
+            console.warn('[DB] Could not save session (run setup-database.sh to enable):', dbError.message);
+            // Voice chat will still work without database
+          }
         }
       } catch (error) {
         console.error('[Voice Chat] Error creating Daily room:', error);

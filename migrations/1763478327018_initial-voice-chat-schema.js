@@ -1,14 +1,14 @@
 /**
  * @type {import('node-pg-migrate').ColumnDefinitions | undefined}
  */
-export const shorthands = undefined;
+const shorthands = undefined;
 
 /**
  * @param pgm {import('node-pg-migrate').MigrationBuilder}
  * @param run {() => void | undefined}
  * @returns {Promise<void> | void}
  */
-export const up = (pgm) => {
+const up = (pgm) => {
   // Create game_sessions table
   pgm.createTable('game_sessions', {
     id: {
@@ -141,9 +141,11 @@ export const up = (pgm) => {
  * @param run {() => void | undefined}
  * @returns {Promise<void> | void}
  */
-export const down = (pgm) => {
+const down = (pgm) => {
   // Drop tables in reverse order (respecting foreign keys)
   pgm.dropTable('transcript_analysis');
   pgm.dropTable('voice_transcripts');
   pgm.dropTable('game_sessions');
 };
+
+module.exports = { shorthands, up, down };
