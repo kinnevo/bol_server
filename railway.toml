@@ -5,9 +5,8 @@ builder = "NIXPACKS"
 NODE_ENV = "production"
 
 [deploy]
-# Run migrations in background, then start server
-# Use || true to continue even if migrations fail (they might already be run)
-startCommand = "npm run migrate:up || true && npm start"
+# Use dedicated startup script that runs migrations first
+startCommand = "bash start.sh"
 # Use a simpler healthcheck endpoint
 healthcheckPath = "/api/server-config"
 healthcheckTimeout = 300
