@@ -2052,51 +2052,58 @@ const PORT = process.env.PORT || process.env.SERVER_PORT || 3001;
 // Initialize Redis and start server
 async function startServer() {
   try {
-    // Initialize Redis connection
-    await initializeRedis();
-    console.log('✅ Redis initialized successfully');
-
-    // Try to load any existing rooms from Redis
-    try {
-      const savedRooms = await roomManager.loadAllRooms();
-      if (savedRooms.size > 0) {
-        // Merge saved rooms into memory and restore bot players
-        for (const [roomId, roomData] of savedRooms.entries()) {
-          // Restore bot players to the players Map first
-          if (roomData.playerNames && Array.isArray(roomData.playerNames)) {
-            for (const playerInfo of roomData.playerNames) {
-              // Check if this is a bot
-              if (playerInfo.isBot || playerInfo.id.startsWith('bot_')) {
-                players.set(playerInfo.id, {
-                  id: playerInfo.id,
-                  name: playerInfo.name,
-                  room: roomId,
-                  isBot: true,
-                  windowSessionId: `bot_session_${playerInfo.id}`
-                });
-                bots.add(playerInfo.id);
-                console.log(`🤖 Restored bot ${playerInfo.name} (${playerInfo.id}) to room ${roomData.name}`);
-              }
-            }
-          }
-
-          // Now set the room with updated playerNames
-          rooms.set(roomId, roomData);
-        }
-        console.log(`📥 Restored ${savedRooms.size} rooms from Redis`);
-      }
-    } catch (error) {
-      console.log('ℹ️ No existing rooms to restore:', error.message);
-    }
-
-    // Start HTTP server
+    // Start HTTP server FIRST so health checks can pass
     server.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
+      console.log(`Server listening on port ${PORT}`);
       console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
       if (process.env.NODE_ENV === 'production') {
         console.log(`Serving React app from: ${path.join(__dirname, '../build')}`);
       }
     });
+
+    // THEN initialize Redis connection (won't block server startup)
+    try {
+      await initializeRedis();
+      console.log('✅ Redis initialized successfully');
+
+      // Try to load any existing rooms from Redis
+      try {
+        const savedRooms = await roomManager.loadAllRooms();
+        if (savedRooms.size > 0) {
+          // Merge saved rooms into memory and restore bot players
+          for (const [roomId, roomData] of savedRooms.entries()) {
+            // Restore bot players to the players Map first
+            if (roomData.playerNames && Array.isArray(roomData.playerNames)) {
+              for (const playerInfo of roomData.playerNames) {
+                // Check if this is a bot
+                if (playerInfo.isBot || playerInfo.id.startsWith('bot_')) {
+                  players.set(playerInfo.id, {
+                    id: playerInfo.id,
+                    name: playerInfo.name,
+                    room: roomId,
+                    isBot: true,
+                    windowSessionId: `bot_session_${playerInfo.id}`
+                  });
+                  bots.add(playerInfo.id);
+                  console.log(`🤖 Restored bot ${playerInfo.name} (${playerInfo.id}) to room ${roomData.name}`);
+                }
+              }
+            }
+
+            // Now set the room with updated playerNames
+            rooms.set(roomId, roomData);
+          }
+          console.log(`📥 Restored ${savedRooms.size} rooms from Redis`);
+        }
+      } catch (error) {
+        console.log('ℹ️ No existing rooms to restore:', error.message);
+      }
+    } catch (redisError) {
+      console.error('⚠️ Redis initialization failed (server will continue without Redis):', redisError.message);
+      console.error('Some features may be limited without Redis');
+    }
+
+    console.log('✅ Server startup complete');
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);
