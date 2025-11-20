@@ -5,9 +5,13 @@ const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
 const OpenAI = require('openai');
+const { v4: uuidv4 } = require('uuid');
 const { initializeRedis, getRedisClient, closeRedis } = require('./utils/redisClient');
 const sessionManager = require('./utils/sessionManager');
 const roomManager = require('./utils/roomManager');
+const { createDailyRoom, deleteDailyRoom, getDailyTranscripts, startRecording } = require('./utils/dailyManager');
+const { createGameSession, endGameSession, saveTranscripts, getSessionByRoomId } = require('./utils/dbClient');
+const authController = require('./utils/authController');
 
 const app = express();
 const server = http.createServer(app);
@@ -182,6 +186,130 @@ app.post('/api/check-room-name', (req, res) => {
     available: true,
     message: `The room name "${trimmedName}" is available`
   });
+});
+
+// ============================================
+// Authentication Endpoints
+// ============================================
+
+// User registration
+app.post('/api/auth/register', async (req, res) => {
+  const { email, password, displayName } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email and password are required'
+    });
+  }
+
+  try {
+    const user = await authController.registerUser(email, password, displayName);
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        email: user.email,
+        displayName: user.display_name
+      }
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Registration failed'
+    });
+  }
+});
+
+// User login
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password, windowSessionId } = req.body;
+
+  if (!email || !password || !windowSessionId) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email, password, and windowSessionId are required'
+    });
+  }
+
+  try {
+    const sessionData = await authController.loginUser(email, password, windowSessionId);
+    res.json({
+      success: true,
+      ...sessionData
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(401).json({
+      success: false,
+      message: error.message || 'Login failed'
+    });
+  }
+});
+
+// Validate session
+app.get('/api/auth/session', async (req, res) => {
+  const sessionToken = req.headers.authorization?.replace('Bearer ', '');
+
+  if (!sessionToken) {
+    return res.status(401).json({
+      success: false,
+      message: 'No session token provided'
+    });
+  }
+
+  try {
+    const session = await authController.validateSession(sessionToken);
+
+    if (!session) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired session'
+      });
+    }
+
+    res.json({
+      success: true,
+      session: {
+        userId: session.userId,
+        email: session.email,
+        displayName: session.displayName
+      }
+    });
+  } catch (error) {
+    console.error('Session validation error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Session validation failed'
+    });
+  }
+});
+
+// User logout
+app.post('/api/auth/logout', async (req, res) => {
+  const sessionToken = req.headers.authorization?.replace('Bearer ', '');
+
+  if (!sessionToken) {
+    return res.status(400).json({
+      success: false,
+      message: 'No session token provided'
+    });
+  }
+
+  try {
+    await authController.logoutUser(sessionToken);
+    res.json({
+      success: true,
+      message: 'Logged out successfully'
+    });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Logout failed'
+    });
+  }
 });
 
 // Store active rooms and players
@@ -1257,11 +1385,62 @@ io.on('connection', async (socket) => {
         };
       });
 
+      // Create Daily.co voice chat room
+      let dailyRoomData = null;
+      let sessionId = uuidv4();
+
+      try {
+        const playersList = room.players.map(pid => {
+          const player = players.get(pid);
+          return {
+            id: pid,
+            name: player ? player.name : 'Unknown',
+            isBot: player ? player.isBot : false
+          };
+        });
+
+        // Only create Daily room for non-bot players
+        const humanPlayers = playersList.filter(p => !p.isBot);
+
+        if (humanPlayers.length > 0) {
+          dailyRoomData = await createDailyRoom(roomId, playersList);
+          room.dailyRoomUrl = dailyRoomData.url;
+          room.dailyRoomName = dailyRoomData.name;
+          room.sessionId = sessionId;
+
+          console.log(`[Voice Chat] Created Daily room for game: ${roomId}`);
+
+          // Create game session in database
+          try {
+            await createGameSession({
+              id: sessionId,
+              roomId: roomId,
+              roomName: room.name,
+              dailyRoomName: dailyRoomData.name,
+              dailyRoomUrl: dailyRoomData.url,
+              playerCount: room.players.length,
+            });
+
+            console.log(`[DB] Created game session: ${sessionId}`);
+          } catch (dbError) {
+            console.warn('[DB] Could not save session (run setup-database.sh to enable):', dbError.message);
+            // Voice chat will still work without database
+          }
+        }
+      } catch (error) {
+        console.error('[Voice Chat] Error creating Daily room:', error);
+        // Continue without voice chat if creation fails
+      }
+
       io.to(roomId).emit('game-started', {
         ...room,
         turnOrder: turnOrderWithNames,
         currentPlayerId: room.turnOrder[0],
-        deckSize: room.deck.length
+        deckSize: room.deck.length,
+        voiceChat: dailyRoomData ? {
+          url: dailyRoomData.url,
+          roomName: dailyRoomData.name,
+        } : null,
       });
 
       // Sync room to Redis
@@ -1679,6 +1858,44 @@ io.on('connection', async (socket) => {
         // Send group summary to all players in the room
         io.to(data.roomId).emit('group-summary-generated', groupSummary);
         console.log(`✅ Group summary sent to all players in room ${data.roomId}`);
+
+        // Mark game session as completed in database
+        if (room.sessionId) {
+          try {
+            await endGameSession(room.sessionId, 'completed');
+            console.log(`[DB] Game session ended: ${room.sessionId}`);
+          } catch (error) {
+            console.error('[DB] Error ending game session:', error);
+          }
+        }
+
+        // Schedule transcript retrieval (Daily needs time to process)
+        if (room.dailyRoomName) {
+          console.log(`[Voice Chat] Scheduling transcript retrieval for room: ${room.dailyRoomName}`);
+
+          setTimeout(async () => {
+            try {
+              const transcripts = await getDailyTranscripts(room.dailyRoomName);
+
+              if (transcripts && transcripts.length > 0 && room.sessionId) {
+                await saveTranscripts(room.sessionId, transcripts);
+                console.log(`[Voice Chat] Saved ${transcripts.length} transcripts for session: ${room.sessionId}`);
+
+                // Notify players that transcripts are ready
+                io.to(data.roomId).emit('transcripts-ready', {
+                  sessionId: room.sessionId,
+                  count: transcripts.length,
+                });
+              }
+
+              // Clean up Daily room
+              await deleteDailyRoom(room.dailyRoomName);
+              console.log(`[Voice Chat] Deleted Daily room: ${room.dailyRoomName}`);
+            } catch (error) {
+              console.error('[Voice Chat] Error retrieving transcripts:', error);
+            }
+          }, 120000); // Wait 2 minutes for Daily to process transcripts
+        }
       } else {
         socket.emit('group-summary-error', 'Failed to generate group summary');
       }
