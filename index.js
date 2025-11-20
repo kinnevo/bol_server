@@ -1982,48 +1982,55 @@ io.on('connection', async (socket) => {
       }
 
       const player = players.get(disconnectedPlayerId);
-      if (player) {
-        console.log(`🔌 Player ${player.name} (${disconnectedPlayerId.slice(0, 8)}...) disconnected`);
 
-        // Mark player as disconnected in Redis with TTL
-        await sessionManager.markPlayerDisconnected(disconnectedPlayerId);
-
-        if (player.room) {
-          const room = rooms.get(player.room);
-          if (room) {
-            // Don't remove player from room immediately - they might reconnect
-            console.log(`⏳ Player ${player.name} temporarily disconnected from room "${room.name}". Waiting for reconnection...`);
-
-            // Notify other players in the room about the disconnection
-            if (room.players.length > 0) {
-              socket.to(player.room).emit('player-disconnected', {
-                playerId: disconnectedPlayerId,
-                playerName: player.name,
-                temporary: true,
-                room: {
-                  ...room,
-                  playerNames: room.players.map(pid => {
-                    const p = players.get(pid);
-                    return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
-                  })
-                }
-              });
-            }
-
-            // Sync room state to Redis
-            await syncRoomToRedis(player.room);
-          }
-        }
-
-        // Keep player in memory for now (Redis TTL will handle cleanup)
-        console.log(`👥 Total players in memory: ${players.size} (player kept for potential reconnection)`);
-
-        // Delete socket mapping
+      // If player not in memory, they may have connected but never joined lobby
+      if (!player) {
+        console.log(`ℹ️ Socket ${socket.id.slice(0, 8)}... disconnected (player ${disconnectedPlayerId.slice(0, 8)}... was not in lobby)`);
+        // Still delete the socket mapping and mark as disconnected in Redis
         await sessionManager.deleteSocketMapping(socket.id);
-
-      } else {
-        console.log(`⚠️ Disconnected player ${disconnectedPlayerId} was not found in players map`);
+        await sessionManager.markPlayerDisconnected(disconnectedPlayerId);
+        return;
       }
+
+      // Player was in lobby/room
+      console.log(`🔌 Player ${player.name} (${disconnectedPlayerId.slice(0, 8)}...) disconnected`);
+
+      // Mark player as disconnected in Redis with TTL
+      await sessionManager.markPlayerDisconnected(disconnectedPlayerId);
+
+      if (player.room) {
+        const room = rooms.get(player.room);
+        if (room) {
+          // Don't remove player from room immediately - they might reconnect
+          console.log(`⏳ Player ${player.name} temporarily disconnected from room "${room.name}". Waiting for reconnection...`);
+
+          // Notify other players in the room about the disconnection
+          if (room.players.length > 0) {
+            socket.to(player.room).emit('player-disconnected', {
+              playerId: disconnectedPlayerId,
+              playerName: player.name,
+              temporary: true,
+              room: {
+                ...room,
+                playerNames: room.players.map(pid => {
+                  const p = players.get(pid);
+                  return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
+                })
+              }
+            });
+          }
+
+          // Sync room state to Redis
+          await syncRoomToRedis(player.room);
+        }
+      }
+
+      // Keep player in memory for now (Redis TTL will handle cleanup)
+      console.log(`👥 Total players in lobby: ${players.size} (player kept for potential reconnection)`);
+
+      // Delete socket mapping
+      await sessionManager.deleteSocketMapping(socket.id);
+
     } catch (error) {
       console.error('Error handling disconnect:', error);
     }
