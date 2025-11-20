@@ -11,6 +11,7 @@ const sessionManager = require('./utils/sessionManager');
 const roomManager = require('./utils/roomManager');
 const { createDailyRoom, deleteDailyRoom, getDailyTranscripts, startRecording } = require('./utils/dailyManager');
 const { createGameSession, endGameSession, saveTranscripts, getSessionByRoomId } = require('./utils/dbClient');
+const authController = require('./utils/authController');
 
 const app = express();
 const server = http.createServer(app);
@@ -185,6 +186,130 @@ app.post('/api/check-room-name', (req, res) => {
     available: true,
     message: `The room name "${trimmedName}" is available`
   });
+});
+
+// ============================================
+// Authentication Endpoints
+// ============================================
+
+// User registration
+app.post('/api/auth/register', async (req, res) => {
+  const { email, password, displayName } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email and password are required'
+    });
+  }
+
+  try {
+    const user = await authController.registerUser(email, password, displayName);
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        email: user.email,
+        displayName: user.display_name
+      }
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Registration failed'
+    });
+  }
+});
+
+// User login
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password, windowSessionId } = req.body;
+
+  if (!email || !password || !windowSessionId) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email, password, and windowSessionId are required'
+    });
+  }
+
+  try {
+    const sessionData = await authController.loginUser(email, password, windowSessionId);
+    res.json({
+      success: true,
+      ...sessionData
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(401).json({
+      success: false,
+      message: error.message || 'Login failed'
+    });
+  }
+});
+
+// Validate session
+app.get('/api/auth/session', async (req, res) => {
+  const sessionToken = req.headers.authorization?.replace('Bearer ', '');
+
+  if (!sessionToken) {
+    return res.status(401).json({
+      success: false,
+      message: 'No session token provided'
+    });
+  }
+
+  try {
+    const session = await authController.validateSession(sessionToken);
+
+    if (!session) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired session'
+      });
+    }
+
+    res.json({
+      success: true,
+      session: {
+        userId: session.userId,
+        email: session.email,
+        displayName: session.displayName
+      }
+    });
+  } catch (error) {
+    console.error('Session validation error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Session validation failed'
+    });
+  }
+});
+
+// User logout
+app.post('/api/auth/logout', async (req, res) => {
+  const sessionToken = req.headers.authorization?.replace('Bearer ', '');
+
+  if (!sessionToken) {
+    return res.status(400).json({
+      success: false,
+      message: 'No session token provided'
+    });
+  }
+
+  try {
+    await authController.logoutUser(sessionToken);
+    res.json({
+      success: true,
+      message: 'Logged out successfully'
+    });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Logout failed'
+    });
+  }
 });
 
 // Store active rooms and players
