@@ -3,7 +3,7 @@
  * Handles user registration, login, and session management
  */
 
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const { pool } = require('./dbClient');
 const { getRedisClient } = require('./redisClient');
