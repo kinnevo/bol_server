@@ -12,6 +12,7 @@ const roomManager = require('./utils/roomManager');
 const { createDailyRoom, deleteDailyRoom, getDailyTranscripts, startRecording } = require('./utils/dailyManager');
 const { createGameSession, endGameSession, saveTranscripts, getSessionByRoomId } = require('./utils/dbClient');
 const authController = require('./utils/authController');
+const sheetsManager = require('./utils/sheetsManager');
 
 const app = express();
 const server = http.createServer(app);
@@ -308,6 +309,104 @@ app.post('/api/auth/logout', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Logout failed'
+    });
+  }
+});
+
+// ============================================
+// Google Sheets Endpoints
+// ============================================
+
+// Get all questions from Google Sheets
+app.get('/api/sheets/questions', async (req, res) => {
+  try {
+    const questions = await sheetsManager.getQuestionsWithCache();
+    res.json({
+      success: true,
+      questions,
+      count: questions.length
+    });
+  } catch (error) {
+    console.error('[Sheets API] Error fetching questions:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch questions from Google Sheets'
+    });
+  }
+});
+
+// Get questions for a specific game session (with tracking to avoid repeats)
+app.get('/api/sheets/questions/:gameSessionId', async (req, res) => {
+  const { gameSessionId } = req.params;
+  const { usedIds, count } = req.query;
+
+  try {
+    const usedQuestionIds = usedIds ? JSON.parse(usedIds) : [];
+    const requestCount = count ? parseInt(count) : null;
+
+    const questions = await sheetsManager.getQuestionsForGame(
+      gameSessionId,
+      usedQuestionIds,
+      requestCount
+    );
+
+    res.json({
+      success: true,
+      questions,
+      count: questions.length,
+      gameSessionId
+    });
+  } catch (error) {
+    console.error('[Sheets API] Error fetching questions for game:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch questions for game session'
+    });
+  }
+});
+
+// Force refresh the questions cache
+app.post('/api/sheets/refresh-cache', async (req, res) => {
+  try {
+    const questions = await sheetsManager.getQuestionsWithCache('Sheet1', 'A:Z', true);
+    res.json({
+      success: true,
+      message: 'Cache refreshed successfully',
+      count: questions.length
+    });
+  } catch (error) {
+    console.error('[Sheets API] Error refreshing cache:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to refresh cache'
+    });
+  }
+});
+
+// Get cache status
+app.get('/api/sheets/cache-status', (req, res) => {
+  const status = sheetsManager.getCacheStatus();
+  res.json({
+    success: true,
+    ...status
+  });
+});
+
+// Test endpoint to verify Google Sheets connection
+app.get('/api/sheets/test', async (req, res) => {
+  try {
+    await sheetsManager.initializeSheetsClient();
+    res.json({
+      success: true,
+      message: 'Google Sheets connection successful',
+      spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID
+    });
+  } catch (error) {
+    console.error('[Sheets API] Connection test failed:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Google Sheets connection failed',
+      error: error.toString()
     });
   }
 });
