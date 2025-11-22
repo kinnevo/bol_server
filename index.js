@@ -1275,7 +1275,8 @@ io.on('connection', async (socket) => {
         playerNames: playerNames,
         turnOrder: turnOrderWithNames,
         finishedPlayers: room.finishedPlayers || [],
-        currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null
+        currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null,
+        deckSize: room.deck ? room.deck.length : 0
       };
 
       socket.emit('room-joined', {
@@ -1339,7 +1340,8 @@ io.on('connection', async (socket) => {
       playerNames: playerNames,
       turnOrder: turnOrderWithNames,
       finishedPlayers: room.finishedPlayers || [],
-      currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null
+      currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null,
+      deckSize: room.deck ? room.deck.length : 0
     };
 
     // Notify the player they joined successfully
@@ -1402,13 +1404,19 @@ io.on('connection', async (socket) => {
         // Only create Daily room for non-bot players
         const humanPlayers = playersList.filter(p => !p.isBot);
 
+        console.log(`[Voice Chat] Creating Daily room for ${humanPlayers.length} human players out of ${playersList.length} total players`);
+
         if (humanPlayers.length > 0) {
+          console.log(`[Voice Chat] Calling createDailyRoom for room ${roomId}`);
           dailyRoomData = await createDailyRoom(roomId, playersList);
+          console.log(`[Voice Chat] Daily room created successfully:`, dailyRoomData);
+
           room.dailyRoomUrl = dailyRoomData.url;
           room.dailyRoomName = dailyRoomData.name;
           room.sessionId = sessionId;
 
           console.log(`[Voice Chat] Created Daily room for game: ${roomId}`);
+          console.log(`[Voice Chat] Room URL: ${dailyRoomData.url}`);
 
           // Create game session in database
           try {
@@ -1426,9 +1434,12 @@ io.on('connection', async (socket) => {
             console.warn('[DB] Could not save session (run setup-database.sh to enable):', dbError.message);
             // Voice chat will still work without database
           }
+        } else {
+          console.log(`[Voice Chat] No human players, skipping Daily room creation`);
         }
       } catch (error) {
         console.error('[Voice Chat] Error creating Daily room:', error);
+        console.error('[Voice Chat] Error stack:', error.stack);
         // Continue without voice chat if creation fails
       }
 
