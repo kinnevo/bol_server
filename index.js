@@ -1276,7 +1276,12 @@ io.on('connection', async (socket) => {
         turnOrder: turnOrderWithNames,
         finishedPlayers: room.finishedPlayers || [],
         currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null,
-        deckSize: room.deck ? room.deck.length : 0
+        deckSize: room.deck ? room.deck.length : 0,
+        // Include voice chat info for reconnection
+        voiceChat: room.dailyRoomUrl ? {
+          url: room.dailyRoomUrl,
+          roomName: room.dailyRoomName
+        } : null
       };
 
       socket.emit('room-joined', {
@@ -1341,7 +1346,12 @@ io.on('connection', async (socket) => {
       turnOrder: turnOrderWithNames,
       finishedPlayers: room.finishedPlayers || [],
       currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null,
-      deckSize: room.deck ? room.deck.length : 0
+      deckSize: room.deck ? room.deck.length : 0,
+      // Include voice chat info for reconnection
+      voiceChat: room.dailyRoomUrl ? {
+        url: room.dailyRoomUrl,
+        roomName: room.dailyRoomName
+      } : null
     };
 
     // Notify the player they joined successfully
