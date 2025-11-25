@@ -41,8 +41,8 @@ async function createDailyRoom(roomId, players) {
       body: JSON.stringify({
         name: roomName,
         properties: {
-          // Room expires after 2 hours
-          exp: Math.floor(Date.now() / 1000) + (2 * 60 * 60),
+          // Room expires after 24 hours (games can be long, players may refresh)
+          exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60),
 
           // Max participants based on player count
           max_participants: players.length,
