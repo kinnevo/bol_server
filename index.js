@@ -1238,12 +1238,16 @@ io.on('connection', async (socket) => {
     const userId = playerData.userId || null;
 
     // If userId is provided, clean up any old player entries for this user (from previous sessions)
+    // Also clean up legacy entries (no userId) with the same name
     if (userId) {
       const oldPlayerEntries = Array.from(players.entries()).filter(([id, p]) =>
-        p.userId === userId && id !== playerId
+        id !== playerId && (
+          p.userId === userId || // Same user, different session
+          (p.name.toLowerCase() === playerData.name.toLowerCase() && !p.userId) // Legacy entry with same name
+        )
       );
       for (const [oldPlayerId, oldPlayer] of oldPlayerEntries) {
-        console.log(`🧹 Cleaning up old player entry for user ${userId}: ${oldPlayer.name} (${oldPlayerId})`);
+        console.log(`🧹 Cleaning up old player entry: ${oldPlayer.name} (${oldPlayerId}, userId: ${oldPlayer.userId || 'none'})`);
         players.delete(oldPlayerId);
         // Also clean up from Redis
         const redis = getRedisClient();
