@@ -37,11 +37,17 @@ async function registerUser(email, password, displayName = null) {
             throw new Error('User with this email already exists');
         }
 
-        // Hash password
-        const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-
         // Set display name to email prefix if not provided
         const finalDisplayName = displayName || email.split('@')[0];
+
+        // Check if display name is already taken
+        const existingDisplayName = await getUserByDisplayName(finalDisplayName);
+        if (existingDisplayName) {
+            throw new Error('This display name is already taken. Please choose a different one.');
+        }
+
+        // Hash password
+        const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
 
         // Insert user into database
         const query = `
@@ -239,6 +245,22 @@ async function getUserById(userId) {
     }
 }
 
+/**
+ * Get user by display name (case-insensitive)
+ * @param {string} displayName - Display name to search for
+ * @returns {Promise<Object|null>} User object or null
+ */
+async function getUserByDisplayName(displayName) {
+    const query = 'SELECT id, email, display_name, created_at FROM users WHERE LOWER(display_name) = LOWER($1)';
+    try {
+        const result = await pool.query(query, [displayName]);
+        return result.rows[0] || null;
+    } catch (error) {
+        console.error('[Auth] Error getting user by display name:', error);
+        throw error;
+    }
+}
+
 module.exports = {
     registerUser,
     loginUser,
@@ -247,4 +269,5 @@ module.exports = {
     logoutUser,
     getUserByEmail,
     getUserById,
+    getUserByDisplayName,
 };

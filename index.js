@@ -117,7 +117,7 @@ app.get('/api/server-config', (req, res) => {
 
 // Check if a player name is available
 app.post('/api/check-name', (req, res) => {
-  const { name } = req.body;
+  const { name, userId } = req.body;
 
   if (!name || !name.trim()) {
     return res.status(400).json({
@@ -134,9 +134,10 @@ app.post('/api/check-name', (req, res) => {
     });
   }
 
-  // Check if name is already taken
+  // Check if name is already taken (excluding players with the same userId)
   const nameInUse = Array.from(players.values()).find(p =>
-    p.name.toLowerCase() === trimmedName.toLowerCase()
+    p.name.toLowerCase() === trimmedName.toLowerCase() &&
+    (!userId || p.userId !== userId) // Exclude players with the same userId
   );
 
   if (nameInUse) {
@@ -187,6 +188,49 @@ app.post('/api/check-room-name', (req, res) => {
     available: true,
     message: `The room name "${trimmedName}" is available`
   });
+});
+
+// Check if a display name is available for registration
+app.post('/api/check-display-name', async (req, res) => {
+  const { displayName } = req.body;
+
+  if (!displayName || !displayName.trim()) {
+    return res.status(400).json({
+      available: false,
+      message: 'Display name cannot be empty'
+    });
+  }
+
+  const trimmedName = displayName.trim();
+  if (trimmedName.length < 2) {
+    return res.status(400).json({
+      available: false,
+      message: 'Display name must be at least 2 characters long'
+    });
+  }
+
+  try {
+    const { getUserByDisplayName } = require('./utils/authController');
+    const existingUser = await getUserByDisplayName(trimmedName);
+
+    if (existingUser) {
+      return res.json({
+        available: false,
+        message: `The display name "${trimmedName}" is already taken`
+      });
+    }
+
+    res.json({
+      available: true,
+      message: `The display name "${trimmedName}" is available`
+    });
+  } catch (error) {
+    console.error('Error checking display name:', error);
+    res.status(500).json({
+      available: false,
+      message: 'Error checking display name availability'
+    });
+  }
 });
 
 // ============================================
@@ -1189,11 +1233,31 @@ io.on('connection', async (socket) => {
 
   // Handle player joining
   socket.on('join-lobby', async (playerData) => {
-    console.log(`🔵 Player joining lobby: ${playerData.name} (Socket: ${socket.id}, Player: ${playerId})`);
+    console.log(`🔵 Player joining lobby: ${playerData.name} (Socket: ${socket.id}, Player: ${playerId}, UserId: ${playerData.userId || 'none'})`);
 
-    // Check if name is already taken by another player
+    const userId = playerData.userId || null;
+
+    // If userId is provided, clean up any old player entries for this user (from previous sessions)
+    if (userId) {
+      const oldPlayerEntries = Array.from(players.entries()).filter(([id, p]) =>
+        p.userId === userId && id !== playerId
+      );
+      for (const [oldPlayerId, oldPlayer] of oldPlayerEntries) {
+        console.log(`🧹 Cleaning up old player entry for user ${userId}: ${oldPlayer.name} (${oldPlayerId})`);
+        players.delete(oldPlayerId);
+        // Also clean up from Redis
+        const redis = getRedisClient();
+        if (redis) {
+          await redis.del(`player:${oldPlayerId}`);
+        }
+      }
+    }
+
+    // Check if name is already taken by another player (excluding same userId)
     const nameInUse = Array.from(players.values()).find(p =>
-      p.name.toLowerCase() === playerData.name.toLowerCase() && p.id !== playerId
+      p.name.toLowerCase() === playerData.name.toLowerCase() &&
+      p.id !== playerId &&
+      (!userId || p.userId !== userId) // Exclude players with the same userId
     );
 
     if (nameInUse) {
@@ -1211,6 +1275,7 @@ io.on('connection', async (socket) => {
       // Update existing player info
       existingPlayer.name = playerData.name;
       existingPlayer.socketId = socket.id;
+      existingPlayer.userId = userId; // Update userId in case it wasn't set before
     } else {
       // Add new player with persistent ID
       players.set(playerId, {
@@ -1220,9 +1285,10 @@ io.on('connection', async (socket) => {
         currentRoom: null,
         windowSessionId: windowSessionId,
         socketId: socket.id,
-        isBot: false
+        isBot: false,
+        userId: userId // Store userId for future reference
       });
-      console.log(`✅ New player added to lobby: ${playerData.name} (Player ID: ${playerId})`);
+      console.log(`✅ New player added to lobby: ${playerData.name} (Player ID: ${playerId}, User ID: ${userId})`);
     }
 
     // Sync player to Redis
