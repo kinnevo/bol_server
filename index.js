@@ -12,6 +12,7 @@ const roomManager = require('./utils/roomManager');
 const { createDailyRoom, deleteDailyRoom, getDailyTranscripts, startRecording } = require('./utils/dailyManager');
 const { createGameSession, endGameSession, saveTranscripts, getSessionByRoomId } = require('./utils/dbClient');
 const authController = require('./utils/authController');
+const sheetsManager = require('./utils/sheetsManager');
 
 const app = express();
 const server = http.createServer(app);
@@ -116,7 +117,7 @@ app.get('/api/server-config', (req, res) => {
 
 // Check if a player name is available
 app.post('/api/check-name', (req, res) => {
-  const { name } = req.body;
+  const { name, userId } = req.body;
 
   if (!name || !name.trim()) {
     return res.status(400).json({
@@ -133,9 +134,10 @@ app.post('/api/check-name', (req, res) => {
     });
   }
 
-  // Check if name is already taken
+  // Check if name is already taken (excluding players with the same userId)
   const nameInUse = Array.from(players.values()).find(p =>
-    p.name.toLowerCase() === trimmedName.toLowerCase()
+    p.name.toLowerCase() === trimmedName.toLowerCase() &&
+    (!userId || p.userId !== userId) // Exclude players with the same userId
   );
 
   if (nameInUse) {
@@ -186,6 +188,49 @@ app.post('/api/check-room-name', (req, res) => {
     available: true,
     message: `The room name "${trimmedName}" is available`
   });
+});
+
+// Check if a display name is available for registration
+app.post('/api/check-display-name', async (req, res) => {
+  const { displayName } = req.body;
+
+  if (!displayName || !displayName.trim()) {
+    return res.status(400).json({
+      available: false,
+      message: 'Display name cannot be empty'
+    });
+  }
+
+  const trimmedName = displayName.trim();
+  if (trimmedName.length < 2) {
+    return res.status(400).json({
+      available: false,
+      message: 'Display name must be at least 2 characters long'
+    });
+  }
+
+  try {
+    const { getUserByDisplayName } = require('./utils/authController');
+    const existingUser = await getUserByDisplayName(trimmedName);
+
+    if (existingUser) {
+      return res.json({
+        available: false,
+        message: `The display name "${trimmedName}" is already taken`
+      });
+    }
+
+    res.json({
+      available: true,
+      message: `The display name "${trimmedName}" is available`
+    });
+  } catch (error) {
+    console.error('Error checking display name:', error);
+    res.status(500).json({
+      available: false,
+      message: 'Error checking display name availability'
+    });
+  }
 });
 
 // ============================================
@@ -308,6 +353,104 @@ app.post('/api/auth/logout', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Logout failed'
+    });
+  }
+});
+
+// ============================================
+// Google Sheets Endpoints
+// ============================================
+
+// Get all questions from Google Sheets
+app.get('/api/sheets/questions', async (req, res) => {
+  try {
+    const questions = await sheetsManager.getQuestionsWithCache();
+    res.json({
+      success: true,
+      questions,
+      count: questions.length
+    });
+  } catch (error) {
+    console.error('[Sheets API] Error fetching questions:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch questions from Google Sheets'
+    });
+  }
+});
+
+// Get questions for a specific game session (with tracking to avoid repeats)
+app.get('/api/sheets/questions/:gameSessionId', async (req, res) => {
+  const { gameSessionId } = req.params;
+  const { usedIds, count } = req.query;
+
+  try {
+    const usedQuestionIds = usedIds ? JSON.parse(usedIds) : [];
+    const requestCount = count ? parseInt(count) : null;
+
+    const questions = await sheetsManager.getQuestionsForGame(
+      gameSessionId,
+      usedQuestionIds,
+      requestCount
+    );
+
+    res.json({
+      success: true,
+      questions,
+      count: questions.length,
+      gameSessionId
+    });
+  } catch (error) {
+    console.error('[Sheets API] Error fetching questions for game:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch questions for game session'
+    });
+  }
+});
+
+// Force refresh the questions cache
+app.post('/api/sheets/refresh-cache', async (req, res) => {
+  try {
+    const questions = await sheetsManager.getQuestionsWithCache('Sheet1', 'A:Z', true);
+    res.json({
+      success: true,
+      message: 'Cache refreshed successfully',
+      count: questions.length
+    });
+  } catch (error) {
+    console.error('[Sheets API] Error refreshing cache:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to refresh cache'
+    });
+  }
+});
+
+// Get cache status
+app.get('/api/sheets/cache-status', (req, res) => {
+  const status = sheetsManager.getCacheStatus();
+  res.json({
+    success: true,
+    ...status
+  });
+});
+
+// Test endpoint to verify Google Sheets connection
+app.get('/api/sheets/test', async (req, res) => {
+  try {
+    await sheetsManager.initializeSheetsClient();
+    res.json({
+      success: true,
+      message: 'Google Sheets connection successful',
+      spreadsheetId: process.env.GOOGLE_SHEETS_SPREADSHEET_ID
+    });
+  } catch (error) {
+    console.error('[Sheets API] Connection test failed:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Google Sheets connection failed',
+      error: error.toString()
     });
   }
 });
@@ -1090,11 +1233,31 @@ io.on('connection', async (socket) => {
 
   // Handle player joining
   socket.on('join-lobby', async (playerData) => {
-    console.log(`🔵 Player joining lobby: ${playerData.name} (Socket: ${socket.id}, Player: ${playerId})`);
+    console.log(`🔵 Player joining lobby: ${playerData.name} (Socket: ${socket.id}, Player: ${playerId}, UserId: ${playerData.userId || 'none'})`);
 
-    // Check if name is already taken by another player
+    const userId = playerData.userId || null;
+
+    // If userId is provided, clean up any old player entries for this user (from previous sessions)
+    if (userId) {
+      const oldPlayerEntries = Array.from(players.entries()).filter(([id, p]) =>
+        p.userId === userId && id !== playerId
+      );
+      for (const [oldPlayerId, oldPlayer] of oldPlayerEntries) {
+        console.log(`🧹 Cleaning up old player entry for user ${userId}: ${oldPlayer.name} (${oldPlayerId})`);
+        players.delete(oldPlayerId);
+        // Also clean up from Redis
+        const redis = getRedisClient();
+        if (redis) {
+          await redis.del(`player:${oldPlayerId}`);
+        }
+      }
+    }
+
+    // Check if name is already taken by another player (excluding same userId)
     const nameInUse = Array.from(players.values()).find(p =>
-      p.name.toLowerCase() === playerData.name.toLowerCase() && p.id !== playerId
+      p.name.toLowerCase() === playerData.name.toLowerCase() &&
+      p.id !== playerId &&
+      (!userId || p.userId !== userId) // Exclude players with the same userId
     );
 
     if (nameInUse) {
@@ -1112,6 +1275,7 @@ io.on('connection', async (socket) => {
       // Update existing player info
       existingPlayer.name = playerData.name;
       existingPlayer.socketId = socket.id;
+      existingPlayer.userId = userId; // Update userId in case it wasn't set before
     } else {
       // Add new player with persistent ID
       players.set(playerId, {
@@ -1121,9 +1285,10 @@ io.on('connection', async (socket) => {
         currentRoom: null,
         windowSessionId: windowSessionId,
         socketId: socket.id,
-        isBot: false
+        isBot: false,
+        userId: userId // Store userId for future reference
       });
-      console.log(`✅ New player added to lobby: ${playerData.name} (Player ID: ${playerId})`);
+      console.log(`✅ New player added to lobby: ${playerData.name} (Player ID: ${playerId}, User ID: ${userId})`);
     }
 
     // Sync player to Redis
@@ -1275,7 +1440,13 @@ io.on('connection', async (socket) => {
         playerNames: playerNames,
         turnOrder: turnOrderWithNames,
         finishedPlayers: room.finishedPlayers || [],
-        currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null
+        currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null,
+        deckSize: room.deck ? room.deck.length : 0,
+        // Include voice chat info for reconnection
+        voiceChat: room.dailyRoomUrl ? {
+          url: room.dailyRoomUrl,
+          roomName: room.dailyRoomName
+        } : null
       };
 
       socket.emit('room-joined', {
@@ -1339,7 +1510,13 @@ io.on('connection', async (socket) => {
       playerNames: playerNames,
       turnOrder: turnOrderWithNames,
       finishedPlayers: room.finishedPlayers || [],
-      currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null
+      currentPlayerId: room.turnOrder ? room.turnOrder[room.currentTurnIndex || 0] : null,
+      deckSize: room.deck ? room.deck.length : 0,
+      // Include voice chat info for reconnection
+      voiceChat: room.dailyRoomUrl ? {
+        url: room.dailyRoomUrl,
+        roomName: room.dailyRoomName
+      } : null
     };
 
     // Notify the player they joined successfully
@@ -1402,13 +1579,19 @@ io.on('connection', async (socket) => {
         // Only create Daily room for non-bot players
         const humanPlayers = playersList.filter(p => !p.isBot);
 
+        console.log(`[Voice Chat] Creating Daily room for ${humanPlayers.length} human players out of ${playersList.length} total players`);
+
         if (humanPlayers.length > 0) {
+          console.log(`[Voice Chat] Calling createDailyRoom for room ${roomId}`);
           dailyRoomData = await createDailyRoom(roomId, playersList);
+          console.log(`[Voice Chat] Daily room created successfully:`, dailyRoomData);
+
           room.dailyRoomUrl = dailyRoomData.url;
           room.dailyRoomName = dailyRoomData.name;
           room.sessionId = sessionId;
 
           console.log(`[Voice Chat] Created Daily room for game: ${roomId}`);
+          console.log(`[Voice Chat] Room URL: ${dailyRoomData.url}`);
 
           // Create game session in database
           try {
@@ -1426,9 +1609,12 @@ io.on('connection', async (socket) => {
             console.warn('[DB] Could not save session (run setup-database.sh to enable):', dbError.message);
             // Voice chat will still work without database
           }
+        } else {
+          console.log(`[Voice Chat] No human players, skipping Daily room creation`);
         }
       } catch (error) {
         console.error('[Voice Chat] Error creating Daily room:', error);
+        console.error('[Voice Chat] Error stack:', error.stack);
         // Continue without voice chat if creation fails
       }
 
