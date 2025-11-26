@@ -487,6 +487,20 @@ async function syncPlayerToRedis(playerId) {
   }
 }
 
+// Helper function to format rooms for broadcasting to clients
+// Filters out finished games so they don't show in the lobby
+function getRoomsForBroadcast() {
+  return Array.from(rooms.values())
+    .filter(r => r.status !== 'finished' && r.gamePhase !== 'finished')
+    .map(r => ({
+      ...r,
+      playerNames: r.players.map(pid => {
+        const p = players.get(pid);
+        return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
+      })
+    }));
+}
+
 // Bot player names pool
 const BOT_NAMES = [
   'BotAlex', 'BotSamantha', 'BotJorge', 'BotEmily', 'BotFede'
@@ -498,7 +512,37 @@ const bots = new Set();
 // Bot availability configuration from environment
 const BOTS_AVAILABLE = process.env.BOTS_AVAILABLE === 'true';
 
+// Voting game configuration from environment
+const POINT_THRESHOLD = parseInt(process.env.POINT_THRESHOLD) || 7;
+const VOTING_TIMEOUT_MS = parseInt(process.env.VOTING_TIMEOUT_MS) || 60000;
+
 console.log(`🤖 Bot players are ${BOTS_AVAILABLE ? 'ENABLED' : 'DISABLED'}`);
+console.log(`🎯 Point threshold to win: ${POINT_THRESHOLD}`);
+console.log(`⏱️ Voting timeout: ${VOTING_TIMEOUT_MS}ms`);
+
+// Placeholder questions for cards (will be replaced by Google Sheets integration)
+const PLACEHOLDER_QUESTIONS = [
+  "What's a moment that changed your perspective on life?",
+  "Share a challenge you've overcome recently.",
+  "What do you value most in your relationships?",
+  "Describe a time when you had to be brave.",
+  "What's something you're grateful for today?",
+  "What new experience or skill would make you feel truly alive?",
+  "What's a risk you're glad you took?",
+  "Who has had the biggest impact on your life and why?",
+  "What's a belief you held strongly that has changed over time?",
+  "If you could give advice to your younger self, what would it be?",
+  "What's something you've always wanted to do but haven't yet?",
+  "Describe a moment when you felt truly connected to someone.",
+  "What's a lesson you learned the hard way?",
+  "What does success mean to you?",
+  "What's a fear you've overcome or are working to overcome?",
+  "What brings you the most joy in life?",
+  "Describe a time you stepped outside your comfort zone.",
+  "What's something about yourself you're proud of?",
+  "What's a dream you haven't given up on?",
+  "How do you handle failure or setbacks?"
+];
 
 // Card types for the deck
 const CARD_TYPES = ['Inflection Point', 'Insight', 'Reflection'];
@@ -511,22 +555,35 @@ const CARD_CONFIG = {
   'Reflection': 10         // Number of Reflection cards in deck
 };
 
-// Function to create and shuffle a card deck
+// Function to create and shuffle a card deck with questions
 function createDeck(customConfig = null) {
   const config = customConfig || CARD_CONFIG;
+
+  // Shuffle questions to randomize which ones get used
+  const shuffledQuestions = [...PLACEHOLDER_QUESTIONS];
+  for (let i = shuffledQuestions.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffledQuestions[i], shuffledQuestions[j]] = [shuffledQuestions[j], shuffledQuestions[i]];
+  }
+
+  let questionIndex = 0;
 
   // Create a deck with configured quantities for each card type
   const deck = [];
   CARD_TYPES.forEach(cardType => {
     const count = config[cardType] || 10; // Default to 10 if not specified
     for (let i = 0; i < count; i++) {
+      // Get a question, cycling through if we run out
+      const question = shuffledQuestions[questionIndex % shuffledQuestions.length];
+      questionIndex++;
+
       deck.push({
         id: `${cardType.toLowerCase().replace(/\s+/g, '-')}-${i}`,
         type: cardType,
-        // Placeholder for future card content
+        question: question,
         content: {
-          front: `This is a ${cardType} card`, // Placeholder text
-          imageBack: null // Will be used for card back image in the future
+          front: question,
+          imageBack: null
         }
       });
     }
@@ -645,6 +702,177 @@ function removeBotFromRoom(roomId, botId) {
   }
 
   return { success: true, bot: bot, room: room };
+}
+
+// Function to process voting results and award points
+function processVotingResults(roomId, io, rooms, players) {
+  const room = rooms.get(roomId);
+  if (!room || !room.votingState) {
+    console.log('⚠️ processVotingResults called but no voting state found');
+    return;
+  }
+
+  const { speakerId, speakerName, votes } = room.votingState;
+
+  // Count votes
+  let connectionPoints = 0;
+  let wisdomPoints = 0;
+
+  Object.values(votes).forEach(vote => {
+    if (vote.type === 'connection') connectionPoints++;
+    if (vote.type === 'wisdom') wisdomPoints++;
+  });
+
+  // Award points to speaker
+  if (room.playerPoints[speakerId]) {
+    room.playerPoints[speakerId].connection += connectionPoints;
+    room.playerPoints[speakerId].wisdom += wisdomPoints;
+  }
+
+  const totalPoints = (room.playerPoints[speakerId]?.connection || 0) + (room.playerPoints[speakerId]?.wisdom || 0);
+
+  console.log(`🏆 ${speakerName} received ${connectionPoints} connection and ${wisdomPoints} wisdom points (Total: ${totalPoints}/${room.pointThreshold})`);
+
+  // Update game phase to results
+  room.gamePhase = 'results';
+
+  // Check for winner
+  const hasWinner = totalPoints >= room.pointThreshold;
+
+  // Broadcast voting results
+  io.to(roomId).emit('voting-results', {
+    speakerId: speakerId,
+    speakerName: speakerName,
+    connectionAwarded: connectionPoints,
+    wisdomAwarded: wisdomPoints,
+    newTotals: room.playerPoints[speakerId],
+    playerPoints: room.playerPoints,
+    hasWinner: hasWinner,
+    gamePhase: room.gamePhase
+  });
+
+  // Clear voting state
+  room.votingState = null;
+
+  if (hasWinner) {
+    // End the game
+    endGame(roomId, speakerId, io, rooms, players);
+  } else {
+    // Wait a moment then advance to next turn
+    setTimeout(() => {
+      advanceToNextTurn(roomId, io, rooms, players);
+    }, 3000); // 3 second delay to show results
+  }
+}
+
+// Function to advance to next turn
+function advanceToNextTurn(roomId, io, rooms, players) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  // Advance turn index
+  room.currentTurnIndex = (room.currentTurnIndex + 1) % room.turnOrder.length;
+  room.gamePhase = 'drawing';
+  room.currentCard = null;
+
+  const nextPlayerId = room.turnOrder[room.currentTurnIndex];
+  const nextPlayer = players.get(nextPlayerId);
+
+  console.log(`➡️ Turn advanced to ${nextPlayer ? nextPlayer.name : 'Unknown'}`);
+
+  // Broadcast turn change
+  io.to(roomId).emit('turn-changed', {
+    currentPlayerId: nextPlayerId,
+    currentPlayerName: nextPlayer ? nextPlayer.name : 'Unknown',
+    isBot: nextPlayer ? nextPlayer.isBot : false,
+    turnIndex: room.currentTurnIndex,
+    gamePhase: room.gamePhase,
+    playerPoints: room.playerPoints
+  });
+}
+
+// Function to end the game
+async function endGame(roomId, winnerId, io, rooms, players) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  room.gamePhase = 'finished';
+  room.status = 'finished';
+
+  const winner = players.get(winnerId);
+  const winnerName = winner ? winner.name : 'Unknown';
+
+  // Calculate final standings (sorted by total points)
+  const standings = room.players.map(pid => {
+    const player = players.get(pid);
+    const points = room.playerPoints[pid] || { connection: 0, wisdom: 0 };
+    return {
+      playerId: pid,
+      playerName: player ? player.name : 'Unknown',
+      isBot: player ? player.isBot : false,
+      connection: points.connection,
+      wisdom: points.wisdom,
+      total: points.connection + points.wisdom
+    };
+  }).sort((a, b) => b.total - a.total);
+
+  console.log(`🎉 Game ended! Winner: ${winnerName} with ${standings[0].total} points`);
+
+  // Save game results to database
+  try {
+    if (room.sessionId) {
+      await endGameSession(room.sessionId, 'completed');
+      console.log(`📊 Game session saved to database: ${room.sessionId}`);
+    }
+  } catch (dbError) {
+    console.warn('[DB] Could not save game session:', dbError.message);
+  }
+
+  // Broadcast game ended
+  io.to(roomId).emit('game-ended', {
+    winnerId: winnerId,
+    winnerName: winnerName,
+    standings: standings,
+    gamePhase: room.gamePhase
+  });
+
+  // Update room list to hide finished game from lobby
+  io.emit('room-list-updated', getRoomsForBroadcast());
+
+  // Clean up room after delay to allow players to see results
+  setTimeout(async () => {
+    console.log(`🗑️ Cleaning up finished room: ${room.name} (${roomId})`);
+
+    // Remove players from the room reference
+    for (const playerId of room.players) {
+      const player = players.get(playerId);
+      if (player) {
+        player.room = null;
+        player.currentRoom = null;
+        await syncPlayerToRedis(playerId);
+      }
+    }
+
+    // Delete Daily.co room if exists
+    if (room.dailyRoomName) {
+      try {
+        await deleteDailyRoom(room.dailyRoomName);
+        console.log(`🎙️ Deleted Daily.co room: ${room.dailyRoomName}`);
+      } catch (dailyError) {
+        console.warn('Could not delete Daily.co room:', dailyError.message);
+      }
+    }
+
+    // Delete room from memory and Redis
+    rooms.delete(roomId);
+    await roomManager.deleteRoom(roomId);
+
+    // Update room and player lists
+    io.emit('room-list-updated', getRoomsForBroadcast());
+    io.emit('player-list-updated', Array.from(players.values()));
+
+    console.log(`✅ Room cleanup complete: ${room.name}`);
+  }, 30000); // 30 seconds delay to let players see results and leave
 }
 
 // Function to simulate bot conversation
@@ -1370,7 +1598,7 @@ io.on('connection', async (socket) => {
     socket.emit('room-created', room);
 
     // Broadcast updated room list to ALL clients
-    io.emit('room-list-updated', Array.from(rooms.values()));
+    io.emit('room-list-updated', getRoomsForBroadcast());
 
     // Update player list since player is now in a room
     io.emit('player-list-updated', Array.from(players.values()));
@@ -1469,6 +1697,73 @@ io.on('connection', async (socket) => {
 
     // Check if room is already playing
     if (room.status === 'playing') {
+      // Check if this player was originally part of the game (in turnOrder)
+      const wasInGame = room.turnOrder && room.turnOrder.some(p => p.id === playerId || p === playerId);
+
+      if (wasInGame) {
+        // Allow rejoining - add player back to room
+        console.log(`✅ Player ${playerId} rejoining game in progress`);
+        room.players.push(playerId);
+        socket.join(roomId);
+
+        // Update player's room
+        if (player) {
+          player.room = roomId;
+          player.currentRoom = roomId;
+          await syncPlayerToRedis(playerId);
+        }
+
+        // Sync room to Redis
+        await syncRoomToRedis(roomId);
+
+        // Build player names
+        const playerNames = room.players.map(pid => {
+          const p = players.get(pid);
+          return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
+        });
+
+        // Build enriched turn order
+        const turnOrderWithNames = room.turnOrder.map(pid => {
+          const id = typeof pid === 'object' ? pid.id : pid;
+          const p = players.get(id);
+          return {
+            id: id,
+            name: p ? p.name : (typeof pid === 'object' ? pid.name : 'Unknown'),
+            isBot: p ? p.isBot : (typeof pid === 'object' ? pid.isBot : false)
+          };
+        });
+
+        const roomWithPlayerNames = {
+          ...room,
+          playerNames: playerNames,
+          turnOrder: turnOrderWithNames,
+          finishedPlayers: room.finishedPlayers || [],
+          currentPlayerId: room.turnOrder ? (typeof room.turnOrder[room.currentTurnIndex || 0] === 'object' ? room.turnOrder[room.currentTurnIndex || 0].id : room.turnOrder[room.currentTurnIndex || 0]) : null,
+          deckSize: room.deck ? room.deck.length : 0,
+          voiceChat: room.dailyRoomUrl ? {
+            url: room.dailyRoomUrl,
+            roomName: room.dailyRoomName
+          } : null
+        };
+
+        socket.emit('room-joined', {
+          ...roomWithPlayerNames,
+          playerId: playerId
+        });
+
+        // Notify other players about the rejoin
+        socket.to(roomId).emit('player-rejoined', {
+          playerId: playerId,
+          playerName: player.name,
+          room: roomWithPlayerNames
+        });
+
+        // Update room list for lobby
+        io.emit('room-list-updated', getRoomsForBroadcast());
+
+        return;
+      }
+
       console.log('Room is already playing:', roomId);
       socket.emit('join-room-error', 'Game is already in progress');
       return;
@@ -1536,7 +1831,7 @@ io.on('connection', async (socket) => {
     });
 
     // Broadcast updated room list to ALL clients
-    io.emit('room-list-updated', Array.from(rooms.values()));
+    io.emit('room-list-updated', getRoomsForBroadcast());
 
     // Update player list since player is now in a room
     io.emit('player-list-updated', Array.from(players.values()));
@@ -1555,6 +1850,18 @@ io.on('connection', async (socket) => {
       room.currentTurnIndex = 0;
       room.deck = createDeck();
       room.drawnCards = []; // Track cards that have been drawn
+
+      // Initialize voting system state
+      room.gamePhase = 'drawing'; // 'drawing' | 'talking' | 'voting' | 'results' | 'finished'
+      room.playerPoints = {};
+      room.players.forEach(pid => {
+        room.playerPoints[pid] = { connection: 0, wisdom: 0 };
+      });
+      room.votingState = null;
+      room.pointThreshold = POINT_THRESHOLD;
+      room.currentCard = null;
+
+      console.log(`🎮 Game started with voting system. Threshold: ${POINT_THRESHOLD} points`);
 
       // Get player names for turn order display
       const turnOrderWithNames = room.turnOrder.map(pid => {
@@ -1627,6 +1934,9 @@ io.on('connection', async (socket) => {
         turnOrder: turnOrderWithNames,
         currentPlayerId: room.turnOrder[0],
         deckSize: room.deck.length,
+        gamePhase: room.gamePhase,
+        playerPoints: room.playerPoints,
+        pointThreshold: room.pointThreshold,
         voiceChat: dailyRoomData ? {
           url: dailyRoomData.url,
           roomName: dailyRoomData.name,
@@ -1663,6 +1973,12 @@ io.on('connection', async (socket) => {
       return;
     }
 
+    // Verify game phase is 'drawing'
+    if (room.gamePhase !== 'drawing') {
+      socket.emit('draw-card-error', 'Cannot draw card in current phase');
+      return;
+    }
+
     // Check if deck is empty
     if (room.deck.length === 0) {
       socket.emit('draw-card-error', 'Deck is empty');
@@ -1677,8 +1993,12 @@ io.on('connection', async (socket) => {
       timestamp: new Date().toISOString()
     });
 
+    // Update game phase to 'talking'
+    room.gamePhase = 'talking';
+    room.currentCard = drawnCard;
+
     const player = players.get(playerId);
-    console.log(`🃏 ${player ? player.name : 'Unknown'} drew a ${drawnCard.type} card`);
+    console.log(`🃏 ${player ? player.name : 'Unknown'} drew a ${drawnCard.type} card: "${drawnCard.question}"`);
 
     // Broadcast the drawn card to all players in the room
     io.to(roomId).emit('card-drawn', {
@@ -1686,11 +2006,166 @@ io.on('connection', async (socket) => {
       playerId: playerId,
       playerName: player ? player.name : 'Unknown',
       deckSize: room.deck.length,
-      isBot: player ? player.isBot : false
+      isBot: player ? player.isBot : false,
+      gamePhase: room.gamePhase
     });
   });
 
-  // Handle advancing to next turn
+  // Handle finish-turn (starts voting phase)
+  socket.on('finish-turn', (data) => {
+    const { roomId, playerId } = data;
+    const room = rooms.get(roomId);
+
+    if (!room) {
+      socket.emit('finish-turn-error', 'Room not found');
+      return;
+    }
+
+    // Verify it's the current player's turn
+    const currentPlayer = room.turnOrder[room.currentTurnIndex];
+    if (currentPlayer !== playerId) {
+      socket.emit('finish-turn-error', 'Not your turn');
+      return;
+    }
+
+    // Verify game phase is 'talking'
+    if (room.gamePhase !== 'talking') {
+      socket.emit('finish-turn-error', 'Cannot finish turn in current phase');
+      return;
+    }
+
+    const speaker = players.get(playerId);
+    const speakerName = speaker ? speaker.name : 'Unknown';
+
+    // Get expected voters (all players except the speaker)
+    const expectedVoters = room.players.filter(pid => pid !== playerId);
+
+    // If only one player (or no other players), skip voting phase
+    if (expectedVoters.length === 0) {
+      console.log(`⏭️ No other players to vote, skipping voting phase`);
+      advanceToNextTurn(roomId, io, rooms, players);
+      return;
+    }
+
+    // Initialize voting state
+    room.gamePhase = 'voting';
+    room.votingState = {
+      speakerId: playerId,
+      speakerName: speakerName,
+      votes: {},
+      expectedVoters: expectedVoters,
+      votingStartTime: Date.now()
+    };
+
+    console.log(`🗳️ Voting phase started for ${speakerName}. Expected voters: ${expectedVoters.length}`);
+
+    // Start voting timeout
+    room.votingTimeoutId = setTimeout(() => {
+      processVotingResults(roomId, io, rooms, players);
+    }, VOTING_TIMEOUT_MS);
+
+    // Handle bot voting automatically
+    expectedVoters.forEach(voterId => {
+      const voter = players.get(voterId);
+      if (voter && voter.isBot) {
+        // Bots vote randomly after a short delay
+        setTimeout(() => {
+          const voteOptions = ['connection', 'wisdom', 'skip'];
+          const randomVote = voteOptions[Math.floor(Math.random() * voteOptions.length)];
+
+          if (room.votingState && !room.votingState.votes[voterId]) {
+            room.votingState.votes[voterId] = {
+              type: randomVote,
+              timestamp: Date.now()
+            };
+
+            console.log(`🤖 Bot ${voter.name} voted: ${randomVote}`);
+
+            // Broadcast vote count update
+            io.to(roomId).emit('vote-count-updated', {
+              voteCount: Object.keys(room.votingState.votes).length,
+              expectedVotes: room.votingState.expectedVoters.length
+            });
+
+            // Check if all votes are in
+            if (Object.keys(room.votingState.votes).length >= room.votingState.expectedVoters.length) {
+              clearTimeout(room.votingTimeoutId);
+              processVotingResults(roomId, io, rooms, players);
+            }
+          }
+        }, 1000 + Math.random() * 2000); // Random delay 1-3 seconds
+      }
+    });
+
+    // Broadcast voting phase started
+    io.to(roomId).emit('voting-phase-started', {
+      speakerId: playerId,
+      speakerName: speakerName,
+      expectedVoters: expectedVoters.map(vid => {
+        const v = players.get(vid);
+        return { id: vid, name: v ? v.name : 'Unknown', isBot: v ? v.isBot : false };
+      }),
+      timeout: VOTING_TIMEOUT_MS,
+      gamePhase: room.gamePhase
+    });
+  });
+
+  // Handle vote submission
+  socket.on('submit-vote', (data) => {
+    const { roomId, voterId, voteType } = data;
+    const room = rooms.get(roomId);
+
+    if (!room) {
+      socket.emit('submit-vote-error', 'Room not found');
+      return;
+    }
+
+    if (room.gamePhase !== 'voting' || !room.votingState) {
+      socket.emit('submit-vote-error', 'Not in voting phase');
+      return;
+    }
+
+    // Validate voter is expected
+    if (!room.votingState.expectedVoters.includes(voterId)) {
+      socket.emit('submit-vote-error', 'You cannot vote');
+      return;
+    }
+
+    // Validate vote type
+    if (!['connection', 'wisdom', 'skip'].includes(voteType)) {
+      socket.emit('submit-vote-error', 'Invalid vote type');
+      return;
+    }
+
+    // Check if already voted
+    if (room.votingState.votes[voterId]) {
+      socket.emit('submit-vote-error', 'Already voted');
+      return;
+    }
+
+    // Record vote
+    room.votingState.votes[voterId] = {
+      type: voteType,
+      timestamp: Date.now()
+    };
+
+    const voter = players.get(voterId);
+    console.log(`🗳️ ${voter ? voter.name : 'Unknown'} voted: ${voteType}`);
+
+    // Broadcast vote count update (anonymous)
+    io.to(roomId).emit('vote-count-updated', {
+      voteCount: Object.keys(room.votingState.votes).length,
+      expectedVotes: room.votingState.expectedVoters.length
+    });
+
+    // Check if all votes are in
+    if (Object.keys(room.votingState.votes).length >= room.votingState.expectedVoters.length) {
+      clearTimeout(room.votingTimeoutId);
+      processVotingResults(roomId, io, rooms, players);
+    }
+  });
+
+  // Legacy next-turn handler (for backwards compatibility)
   socket.on('next-turn', (data) => {
     const { roomId } = data;
     const room = rooms.get(roomId);
@@ -1700,20 +2175,15 @@ io.on('connection', async (socket) => {
       return;
     }
 
-    // Advance to next turn
-    room.currentTurnIndex = (room.currentTurnIndex + 1) % room.turnOrder.length;
-    const nextPlayerId = room.turnOrder[room.currentTurnIndex];
-    const nextPlayer = players.get(nextPlayerId);
+    // If in talking phase, treat as finish-turn
+    if (room.gamePhase === 'talking') {
+      const currentPlayer = room.turnOrder[room.currentTurnIndex];
+      socket.emit('finish-turn', { roomId, playerId: currentPlayer });
+      return;
+    }
 
-    console.log(`➡️ Turn advanced to ${nextPlayer ? nextPlayer.name : 'Unknown'}`);
-
-    // Broadcast turn change to all players
-    io.to(roomId).emit('turn-changed', {
-      currentPlayerId: nextPlayerId,
-      currentPlayerName: nextPlayer ? nextPlayer.name : 'Unknown',
-      isBot: nextPlayer ? nextPlayer.isBot : false,
-      turnIndex: room.currentTurnIndex
-    });
+    // Otherwise just advance turn (legacy behavior)
+    advanceToNextTurn(roomId, io, rooms, players);
   });
 
   // Handle adding a bot to a room
@@ -1755,7 +2225,7 @@ io.on('connection', async (socket) => {
       });
 
       // Broadcast updated room list to ALL clients
-      io.emit('room-list-updated', Array.from(rooms.values()));
+      io.emit('room-list-updated', getRoomsForBroadcast());
 
       // Update player list
       io.emit('player-list-updated', Array.from(players.values()));
@@ -1802,7 +2272,7 @@ io.on('connection', async (socket) => {
       }
 
       // Broadcast updated room list to ALL clients
-      io.emit('room-list-updated', Array.from(rooms.values()));
+      io.emit('room-list-updated', getRoomsForBroadcast());
 
       // Update player list
       io.emit('player-list-updated', Array.from(players.values()));
@@ -2146,8 +2616,8 @@ io.on('connection', async (socket) => {
       await syncRoomToRedis(room.id);
     }
 
-    // Broadcast updated room and player lists
-    io.emit('room-list-updated', Array.from(rooms.values()));
+    // Broadcast updated room and player lists with proper player names
+    io.emit('room-list-updated', getRoomsForBroadcast());
     io.emit('player-list-updated', Array.from(players.values()));
 
     // Confirm to the leaving player
