@@ -487,6 +487,17 @@ async function syncPlayerToRedis(playerId) {
   }
 }
 
+// Helper function to format rooms for broadcasting to clients
+function getRoomsForBroadcast() {
+  return Array.from(rooms.values()).map(r => ({
+    ...r,
+    playerNames: r.players.map(pid => {
+      const p = players.get(pid);
+      return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
+    })
+  }));
+}
+
 // Bot player names pool
 const BOT_NAMES = [
   'BotAlex', 'BotSamantha', 'BotJorge', 'BotEmily', 'BotFede'
@@ -1535,7 +1546,7 @@ io.on('connection', async (socket) => {
     socket.emit('room-created', room);
 
     // Broadcast updated room list to ALL clients
-    io.emit('room-list-updated', Array.from(rooms.values()));
+    io.emit('room-list-updated', getRoomsForBroadcast());
 
     // Update player list since player is now in a room
     io.emit('player-list-updated', Array.from(players.values()));
@@ -1634,6 +1645,73 @@ io.on('connection', async (socket) => {
 
     // Check if room is already playing
     if (room.status === 'playing') {
+      // Check if this player was originally part of the game (in turnOrder)
+      const wasInGame = room.turnOrder && room.turnOrder.some(p => p.id === playerId || p === playerId);
+
+      if (wasInGame) {
+        // Allow rejoining - add player back to room
+        console.log(`✅ Player ${playerId} rejoining game in progress`);
+        room.players.push(playerId);
+        socket.join(roomId);
+
+        // Update player's room
+        if (player) {
+          player.room = roomId;
+          player.currentRoom = roomId;
+          await syncPlayerToRedis(playerId);
+        }
+
+        // Sync room to Redis
+        await syncRoomToRedis(roomId);
+
+        // Build player names
+        const playerNames = room.players.map(pid => {
+          const p = players.get(pid);
+          return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
+        });
+
+        // Build enriched turn order
+        const turnOrderWithNames = room.turnOrder.map(pid => {
+          const id = typeof pid === 'object' ? pid.id : pid;
+          const p = players.get(id);
+          return {
+            id: id,
+            name: p ? p.name : (typeof pid === 'object' ? pid.name : 'Unknown'),
+            isBot: p ? p.isBot : (typeof pid === 'object' ? pid.isBot : false)
+          };
+        });
+
+        const roomWithPlayerNames = {
+          ...room,
+          playerNames: playerNames,
+          turnOrder: turnOrderWithNames,
+          finishedPlayers: room.finishedPlayers || [],
+          currentPlayerId: room.turnOrder ? (typeof room.turnOrder[room.currentTurnIndex || 0] === 'object' ? room.turnOrder[room.currentTurnIndex || 0].id : room.turnOrder[room.currentTurnIndex || 0]) : null,
+          deckSize: room.deck ? room.deck.length : 0,
+          voiceChat: room.dailyRoomUrl ? {
+            url: room.dailyRoomUrl,
+            roomName: room.dailyRoomName
+          } : null
+        };
+
+        socket.emit('room-joined', {
+          ...roomWithPlayerNames,
+          playerId: playerId
+        });
+
+        // Notify other players about the rejoin
+        socket.to(roomId).emit('player-rejoined', {
+          playerId: playerId,
+          playerName: player.name,
+          room: roomWithPlayerNames
+        });
+
+        // Update room list for lobby
+        io.emit('room-list-updated', getRoomsForBroadcast());
+
+        return;
+      }
+
       console.log('Room is already playing:', roomId);
       socket.emit('join-room-error', 'Game is already in progress');
       return;
@@ -1701,7 +1779,7 @@ io.on('connection', async (socket) => {
     });
 
     // Broadcast updated room list to ALL clients
-    io.emit('room-list-updated', Array.from(rooms.values()));
+    io.emit('room-list-updated', getRoomsForBroadcast());
 
     // Update player list since player is now in a room
     io.emit('player-list-updated', Array.from(players.values()));
@@ -2095,7 +2173,7 @@ io.on('connection', async (socket) => {
       });
 
       // Broadcast updated room list to ALL clients
-      io.emit('room-list-updated', Array.from(rooms.values()));
+      io.emit('room-list-updated', getRoomsForBroadcast());
 
       // Update player list
       io.emit('player-list-updated', Array.from(players.values()));
@@ -2142,7 +2220,7 @@ io.on('connection', async (socket) => {
       }
 
       // Broadcast updated room list to ALL clients
-      io.emit('room-list-updated', Array.from(rooms.values()));
+      io.emit('room-list-updated', getRoomsForBroadcast());
 
       // Update player list
       io.emit('player-list-updated', Array.from(players.values()));
@@ -2486,8 +2564,8 @@ io.on('connection', async (socket) => {
       await syncRoomToRedis(room.id);
     }
 
-    // Broadcast updated room and player lists
-    io.emit('room-list-updated', Array.from(rooms.values()));
+    // Broadcast updated room and player lists with proper player names
+    io.emit('room-list-updated', getRoomsForBroadcast());
     io.emit('player-list-updated', Array.from(players.values()));
 
     // Confirm to the leaving player
