@@ -488,14 +488,17 @@ async function syncPlayerToRedis(playerId) {
 }
 
 // Helper function to format rooms for broadcasting to clients
+// Filters out finished games so they don't show in the lobby
 function getRoomsForBroadcast() {
-  return Array.from(rooms.values()).map(r => ({
-    ...r,
-    playerNames: r.players.map(pid => {
-      const p = players.get(pid);
-      return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
-    })
-  }));
+  return Array.from(rooms.values())
+    .filter(r => r.status !== 'finished' && r.gamePhase !== 'finished')
+    .map(r => ({
+      ...r,
+      playerNames: r.players.map(pid => {
+        const p = players.get(pid);
+        return { id: pid, name: p ? p.name : 'Unknown', isBot: p ? p.isBot : false };
+      })
+    }));
 }
 
 // Bot player names pool
@@ -789,11 +792,12 @@ function advanceToNextTurn(roomId, io, rooms, players) {
 }
 
 // Function to end the game
-function endGame(roomId, winnerId, io, rooms, players) {
+async function endGame(roomId, winnerId, io, rooms, players) {
   const room = rooms.get(roomId);
   if (!room) return;
 
   room.gamePhase = 'finished';
+  room.status = 'finished';
 
   const winner = players.get(winnerId);
   const winnerName = winner ? winner.name : 'Unknown';
@@ -814,6 +818,16 @@ function endGame(roomId, winnerId, io, rooms, players) {
 
   console.log(`🎉 Game ended! Winner: ${winnerName} with ${standings[0].total} points`);
 
+  // Save game results to database
+  try {
+    if (room.sessionId) {
+      await endGameSession(room.sessionId, 'completed');
+      console.log(`📊 Game session saved to database: ${room.sessionId}`);
+    }
+  } catch (dbError) {
+    console.warn('[DB] Could not save game session:', dbError.message);
+  }
+
   // Broadcast game ended
   io.to(roomId).emit('game-ended', {
     winnerId: winnerId,
@@ -821,6 +835,44 @@ function endGame(roomId, winnerId, io, rooms, players) {
     standings: standings,
     gamePhase: room.gamePhase
   });
+
+  // Update room list to hide finished game from lobby
+  io.emit('room-list-updated', getRoomsForBroadcast());
+
+  // Clean up room after delay to allow players to see results
+  setTimeout(async () => {
+    console.log(`🗑️ Cleaning up finished room: ${room.name} (${roomId})`);
+
+    // Remove players from the room reference
+    for (const playerId of room.players) {
+      const player = players.get(playerId);
+      if (player) {
+        player.room = null;
+        player.currentRoom = null;
+        await syncPlayerToRedis(playerId);
+      }
+    }
+
+    // Delete Daily.co room if exists
+    if (room.dailyRoomName) {
+      try {
+        await deleteDailyRoom(room.dailyRoomName);
+        console.log(`🎙️ Deleted Daily.co room: ${room.dailyRoomName}`);
+      } catch (dailyError) {
+        console.warn('Could not delete Daily.co room:', dailyError.message);
+      }
+    }
+
+    // Delete room from memory and Redis
+    rooms.delete(roomId);
+    await roomManager.deleteRoom(roomId);
+
+    // Update room and player lists
+    io.emit('room-list-updated', getRoomsForBroadcast());
+    io.emit('player-list-updated', Array.from(players.values()));
+
+    console.log(`✅ Room cleanup complete: ${room.name}`);
+  }, 30000); // 30 seconds delay to let players see results and leave
 }
 
 // Function to simulate bot conversation
