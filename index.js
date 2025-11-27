@@ -634,6 +634,14 @@ async function createDeck(customConfig = null) {
   // Shuffle the deck
   shuffleArray(deck);
 
+  // Ensure first card is an Inflection Point (move one to the top/last position since we pop)
+  const firstInflectionIndex = deck.findIndex(card => card.type === 'Inflection Point');
+  if (firstInflectionIndex !== -1 && firstInflectionIndex !== deck.length - 1) {
+    const lastIndex = deck.length - 1;
+    [deck[firstInflectionIndex], deck[lastIndex]] = [deck[lastIndex], deck[firstInflectionIndex]];
+    console.log('🎯 Ensured first card is an Inflection Point');
+  }
+
   console.log(`🃏 Created deck with ${deck.length} cards:`,
     CARD_TYPES.map(type => `${type}: ${config[type] || 10}`).join(', '));
 
