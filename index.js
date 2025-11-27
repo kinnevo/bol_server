@@ -555,45 +555,84 @@ const CARD_CONFIG = {
   'Reflection': 10         // Number of Reflection cards in deck
 };
 
+// Fisher-Yates shuffle helper
+function shuffleArray(array) {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+  return array;
+}
+
 // Function to create and shuffle a card deck with questions
-function createDeck(customConfig = null) {
+async function createDeck(customConfig = null) {
   const config = customConfig || CARD_CONFIG;
 
-  // Shuffle questions to randomize which ones get used
-  const shuffledQuestions = [...PLACEHOLDER_QUESTIONS];
-  for (let i = shuffledQuestions.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [shuffledQuestions[i], shuffledQuestions[j]] = [shuffledQuestions[j], shuffledQuestions[i]];
+  // Fetch inflection questions from Google Sheets
+  let inflectionQuestions = [];
+  try {
+    inflectionQuestions = await sheetsManager.fetchInflectionQuestions();
+    console.log(`📋 Loaded ${inflectionQuestions.length} inflection questions from Google Sheets`);
+  } catch (error) {
+    console.error('⚠️ Failed to load Google Sheets questions, using placeholders:', error.message);
+    inflectionQuestions = PLACEHOLDER_QUESTIONS.map((q, i) => ({ id: i, land: 'General', question: q }));
   }
 
-  let questionIndex = 0;
+  // Shuffle inflection questions
+  shuffleArray(inflectionQuestions);
 
-  // Create a deck with configured quantities for each card type
   const deck = [];
-  CARD_TYPES.forEach(cardType => {
-    const count = config[cardType] || 10; // Default to 10 if not specified
-    for (let i = 0; i < count; i++) {
-      // Get a question, cycling through if we run out
-      const question = shuffledQuestions[questionIndex % shuffledQuestions.length];
-      questionIndex++;
+  let inflectionIndex = 0;
 
-      deck.push({
-        id: `${cardType.toLowerCase().replace(/\s+/g, '-')}-${i}`,
-        type: cardType,
-        question: question,
-        content: {
-          front: question,
-          imageBack: null
-        }
-      });
-    }
-  });
+  // Create Inflection Point cards with Google Sheets questions
+  const inflectionCount = config['Inflection Point'] || 10;
+  for (let i = 0; i < inflectionCount; i++) {
+    const q = inflectionQuestions[inflectionIndex % inflectionQuestions.length];
+    inflectionIndex++;
 
-  // Shuffle the deck using Fisher-Yates algorithm
-  for (let i = deck.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [deck[i], deck[j]] = [deck[j], deck[i]];
+    deck.push({
+      id: `inflection-point-${i}`,
+      type: 'Inflection Point',
+      land: q.land,
+      question: q.question,
+      content: {
+        front: q.question,
+        land: q.land,
+        imageBack: null
+      }
+    });
   }
+
+  // Create Insight cards - focused on LAST Inflection Point
+  const insightCount = config['Insight'] || 10;
+  for (let i = 0; i < insightCount; i++) {
+    deck.push({
+      id: `insight-${i}`,
+      type: 'Insight',
+      question: null,
+      content: {
+        front: "What insight did you gain from the last player's response to their Inflection Point?",
+        imageBack: null
+      }
+    });
+  }
+
+  // Create Reflection cards - focused on LAST Inflection Point
+  const reflectionCount = config['Reflection'] || 10;
+  for (let i = 0; i < reflectionCount; i++) {
+    deck.push({
+      id: `reflection-${i}`,
+      type: 'Reflection',
+      question: null,
+      content: {
+        front: 'Share a connection between the last Inflection Point discussion and your own experience.',
+        imageBack: null
+      }
+    });
+  }
+
+  // Shuffle the deck
+  shuffleArray(deck);
 
   console.log(`🃏 Created deck with ${deck.length} cards:`,
     CARD_TYPES.map(type => `${type}: ${config[type] || 10}`).join(', '));
@@ -1848,7 +1887,7 @@ io.on('connection', async (socket) => {
       // Initialize turn system
       room.turnOrder = assignTurnOrder(room.players);
       room.currentTurnIndex = 0;
-      room.deck = createDeck();
+      room.deck = await createDeck();
       room.drawnCards = []; // Track cards that have been drawn
 
       // Initialize voting system state
@@ -1860,6 +1899,7 @@ io.on('connection', async (socket) => {
       room.votingState = null;
       room.pointThreshold = POINT_THRESHOLD;
       room.currentCard = null;
+      room.consecutiveNonInflection = 0; // Track consecutive non-Inflection Point turns
 
       console.log(`🎮 Game started with voting system. Threshold: ${POINT_THRESHOLD} points`);
 
@@ -1985,8 +2025,31 @@ io.on('connection', async (socket) => {
       return;
     }
 
-    // Draw the top card
-    const drawnCard = room.deck.pop();
+    // Force Inflection Point if 2 consecutive non-Inflection turns have passed
+    let drawnCard;
+    if (room.consecutiveNonInflection >= 2) {
+      // Find an Inflection Point card in the deck
+      const inflectionIndex = room.deck.findIndex(card => card.type === 'Inflection Point');
+      if (inflectionIndex !== -1) {
+        // Remove the Inflection Point card from its position
+        drawnCard = room.deck.splice(inflectionIndex, 1)[0];
+        console.log(`🎯 Forced Inflection Point card after ${room.consecutiveNonInflection} non-Inflection turns`);
+      } else {
+        // No Inflection Point cards left, draw normally
+        drawnCard = room.deck.pop();
+      }
+    } else {
+      // Draw the top card normally
+      drawnCard = room.deck.pop();
+    }
+
+    // Update consecutive non-Inflection counter
+    if (drawnCard.type === 'Inflection Point') {
+      room.consecutiveNonInflection = 0;
+    } else {
+      room.consecutiveNonInflection++;
+    }
+
     room.drawnCards.push({
       ...drawnCard,
       drawnBy: playerId,

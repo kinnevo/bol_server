@@ -167,6 +167,23 @@ async function getQuestionsForGame(gameSessionId, usedQuestionIds = [], count = 
 }
 
 /**
+ * Fetches inflection point questions from the "3 levels again" sheet
+ * Returns questions with land (Subject) and question text (Easy column)
+ * @returns {Promise<Array>} Array of { id, land, question } objects
+ */
+async function fetchInflectionQuestions() {
+  const questions = await fetchQuestions('3 levels again', 'A:Z');
+
+  return questions
+    .filter(row => row.Easy && row.Easy.trim())
+    .map((row, index) => ({
+      id: row.ID || index,
+      land: row.Subject || 'General',
+      question: row.Easy.trim()
+    }));
+}
+
+/**
  * Clears the questions cache
  * Useful for testing or forcing an immediate refresh
  */
@@ -195,6 +212,7 @@ module.exports = {
   fetchQuestions,
   getQuestionsWithCache,
   getQuestionsForGame,
+  fetchInflectionQuestions,
   clearCache,
   getCacheStatus,
 };
