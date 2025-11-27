@@ -1899,6 +1899,7 @@ io.on('connection', async (socket) => {
       room.votingState = null;
       room.pointThreshold = POINT_THRESHOLD;
       room.currentCard = null;
+      room.consecutiveNonInflection = 0; // Track consecutive non-Inflection Point turns
 
       console.log(`🎮 Game started with voting system. Threshold: ${POINT_THRESHOLD} points`);
 
@@ -2024,8 +2025,31 @@ io.on('connection', async (socket) => {
       return;
     }
 
-    // Draw the top card
-    const drawnCard = room.deck.pop();
+    // Force Inflection Point if 2 consecutive non-Inflection turns have passed
+    let drawnCard;
+    if (room.consecutiveNonInflection >= 2) {
+      // Find an Inflection Point card in the deck
+      const inflectionIndex = room.deck.findIndex(card => card.type === 'Inflection Point');
+      if (inflectionIndex !== -1) {
+        // Remove the Inflection Point card from its position
+        drawnCard = room.deck.splice(inflectionIndex, 1)[0];
+        console.log(`🎯 Forced Inflection Point card after ${room.consecutiveNonInflection} non-Inflection turns`);
+      } else {
+        // No Inflection Point cards left, draw normally
+        drawnCard = room.deck.pop();
+      }
+    } else {
+      // Draw the top card normally
+      drawnCard = room.deck.pop();
+    }
+
+    // Update consecutive non-Inflection counter
+    if (drawnCard.type === 'Inflection Point') {
+      room.consecutiveNonInflection = 0;
+    } else {
+      room.consecutiveNonInflection++;
+    }
+
     room.drawnCards.push({
       ...drawnCard,
       drawnBy: playerId,
