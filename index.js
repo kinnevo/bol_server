@@ -22,6 +22,7 @@ const io = socketIo(server, {
       ? [
         process.env.CLIENT_URL || "https://your-frontend-app.up.railway.app",
         "https://bolrailway-production.up.railway.app",
+        "https://game.bridgesoflife.online",
         /\.up\.railway\.app$/,
         /\.railway\.app$/
       ]
@@ -36,6 +37,7 @@ app.use(cors({
     ? [
       process.env.CLIENT_URL || "https://your-frontend-app.up.railway.app",
       "https://bolrailway-production.up.railway.app",
+      "https://game.bridgesoflife.online",
       /\.up\.railway\.app$/,
       /\.railway\.app$/
     ]
