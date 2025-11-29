@@ -360,6 +360,112 @@ app.post('/api/auth/logout', async (req, res) => {
 });
 
 // ============================================
+// User Profile Endpoints
+// ============================================
+
+// Get user profile
+app.get('/api/user/profile', async (req, res) => {
+  const sessionToken = req.headers.authorization?.replace('Bearer ', '');
+
+  if (!sessionToken) {
+    return res.status(401).json({
+      success: false,
+      message: 'Authentication required'
+    });
+  }
+
+  try {
+    const session = await authController.validateSession(sessionToken);
+    if (!session) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired session'
+      });
+    }
+
+    const profile = await authController.getUserProfile(session.userId);
+    if (!profile) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      profile: {
+        id: profile.id,
+        email: profile.email,
+        displayName: profile.display_name,
+        bio: profile.bio,
+        location: profile.location,
+        website: profile.website,
+        createdAt: profile.created_at,
+        updatedAt: profile.updated_at
+      }
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get profile'
+    });
+  }
+});
+
+// Update user profile
+app.put('/api/user/profile', async (req, res) => {
+  const sessionToken = req.headers.authorization?.replace('Bearer ', '');
+
+  if (!sessionToken) {
+    return res.status(401).json({
+      success: false,
+      message: 'Authentication required'
+    });
+  }
+
+  try {
+    const session = await authController.validateSession(sessionToken);
+    if (!session) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid or expired session'
+      });
+    }
+
+    const { displayName, bio, location, website } = req.body;
+
+    const updatedProfile = await authController.updateUserProfile(session.userId, {
+      displayName,
+      bio,
+      location,
+      website
+    });
+
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      profile: {
+        id: updatedProfile.id,
+        email: updatedProfile.email,
+        displayName: updatedProfile.display_name,
+        bio: updatedProfile.bio,
+        location: updatedProfile.location,
+        website: updatedProfile.website,
+        createdAt: updatedProfile.created_at,
+        updatedAt: updatedProfile.updated_at
+      }
+    });
+  } catch (error) {
+    console.error('Update profile error:', error);
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Failed to update profile'
+    });
+  }
+});
+
+// ============================================
 // Google Sheets Endpoints
 // ============================================
 
