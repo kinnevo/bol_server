@@ -261,6 +261,103 @@ async function getUserByDisplayName(displayName) {
     }
 }
 
+/**
+ * Get full user profile including all profile fields
+ * @param {string} userId - User UUID
+ * @returns {Promise<Object|null>} User profile or null
+ */
+async function getUserProfile(userId) {
+    const query = `
+        SELECT id, email, display_name, bio, location, website, created_at, updated_at
+        FROM users
+        WHERE id = $1
+    `;
+    try {
+        const result = await pool.query(query, [userId]);
+        return result.rows[0] || null;
+    } catch (error) {
+        console.error('[Auth] Error getting user profile:', error);
+        throw error;
+    }
+}
+
+/**
+ * Update user profile
+ * @param {string} userId - User UUID
+ * @param {Object} profileData - Profile data to update
+ * @param {string} [profileData.displayName] - New display name
+ * @param {string} [profileData.bio] - User biography
+ * @param {string} [profileData.location] - User location
+ * @param {string} [profileData.website] - User website/social link
+ * @returns {Promise<Object>} Updated user profile
+ */
+async function updateUserProfile(userId, profileData) {
+    const { displayName, bio, location, website } = profileData;
+
+    // Validate display name if provided
+    if (displayName !== undefined) {
+        if (!displayName || displayName.trim().length === 0) {
+            throw new Error('Display name cannot be empty');
+        }
+        if (displayName.length > 100) {
+            throw new Error('Display name must be 100 characters or less');
+        }
+
+        // Check if display name is already taken by another user
+        const existingUser = await getUserByDisplayName(displayName);
+        if (existingUser && existingUser.id !== userId) {
+            throw new Error('This display name is already taken');
+        }
+    }
+
+    // Validate bio if provided
+    if (bio !== undefined && bio && bio.length > 500) {
+        throw new Error('Bio must be 500 characters or less');
+    }
+
+    // Validate location if provided
+    if (location !== undefined && location && location.length > 100) {
+        throw new Error('Location must be 100 characters or less');
+    }
+
+    // Validate website if provided
+    if (website !== undefined && website && website.length > 255) {
+        throw new Error('Website URL must be 255 characters or less');
+    }
+
+    try {
+        const query = `
+            UPDATE users
+            SET
+                display_name = COALESCE($2, display_name),
+                bio = COALESCE($3, bio),
+                location = COALESCE($4, location),
+                website = COALESCE($5, website),
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, email, display_name, bio, location, website, created_at, updated_at
+        `;
+
+        const result = await pool.query(query, [
+            userId,
+            displayName || null,
+            bio !== undefined ? bio : null,
+            location !== undefined ? location : null,
+            website !== undefined ? website : null,
+        ]);
+
+        if (result.rows.length === 0) {
+            throw new Error('User not found');
+        }
+
+        console.log(`[Auth] User profile updated: ${userId}`);
+        return result.rows[0];
+    } catch (error) {
+        console.error('[Auth] Error updating user profile:', error);
+        throw error;
+    }
+}
+
 module.exports = {
     registerUser,
     loginUser,
@@ -270,4 +367,6 @@ module.exports = {
     getUserByEmail,
     getUserById,
     getUserByDisplayName,
+    getUserProfile,
+    updateUserProfile,
 };
