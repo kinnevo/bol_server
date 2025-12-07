@@ -6,7 +6,10 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node test/run-all-tests.js",
+    "test:unit": "node test/transcript-unit.test.js",
+    "test:integration": "node test/transcript-integration.test.js",
+    "test:transcripts": "node test/run-all-tests.js --all",
     "migrate:up": "node-pg-migrate up",
     "migrate:down": "node-pg-migrate down",
     "migrate:create": "node-pg-migrate create"
