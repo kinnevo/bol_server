@@ -1,8 +1,60 @@
-# Daily.co Transcript System Tests
+# BOL Game Server - Test Suite
 
-Comprehensive test suite for the Daily.co transcript retrieval and storage system.
+Comprehensive test suite for the Daily.co transcript retrieval, storage, and AI summary generation systems.
 
 ## Test Files
+
+### AI Summary Feature Tests (NEW!)
+
+#### 1. `ai-summary-unit.test.js` - AI Summary Unit Tests
+Tests the LangChain integration and summary generation functions in isolation.
+
+**Test Suites:**
+- Fallback Summary Generation (No Transcripts)
+- Error Fallback Summary Generation (API Failures)
+- Database Function Structure Validation
+- Summary Content Requirements (3-5 topics, 2-3 highlights, etc.)
+- Parallel Summary Generation Structure
+
+**Run:**
+```bash
+node test/ai-summary-unit.test.js
+```
+
+#### 2. `ai-summary-integration.test.js` - AI Summary Integration Tests
+Tests the complete AI summary workflow with real LangChain/OpenAI API calls.
+
+**Test Suites:**
+- Database Connection Verification
+- Game Session Creation
+- Mock Transcript Storage
+- Player Transcript Retrieval
+- Real AI Summary Generation (GPT-4o-mini API call)
+- Summary Database Storage
+- Multi-Player Parallel Summary Generation
+
+**Run:**
+```bash
+node test/ai-summary-integration.test.js
+```
+
+**Note:** Requires `OPENAI_API_KEY` in `.env`. Real API calls will be made and will incur minimal costs (~$0.001 per test run).
+
+#### 3. `run-ai-summary-tests.js` - AI Test Runner
+Runs both AI summary unit and integration tests with summary reporting.
+
+**Run:**
+```bash
+node test/run-ai-summary-tests.js
+# or
+node test/run-ai-summary-tests.js --all
+node test/run-ai-summary-tests.js --unit
+node test/run-ai-summary-tests.js --integration
+```
+
+---
+
+### Transcript System Tests
 
 ### 1. `transcript-unit.test.js` - Static Unit Tests
 Tests individual functions and logic in isolation without external dependencies.
