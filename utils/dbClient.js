@@ -261,6 +261,97 @@ async function getSessionByRoomId(roomId) {
 }
 
 /**
+ * Retrieves transcripts for a specific player in a game session
+ * @param {string} sessionId - The session UUID
+ * @param {string} playerId - The player's UUID
+ * @returns {Promise<Array>} Array of transcript records for the player
+ */
+async function getTranscriptsByPlayer(sessionId, playerId) {
+  const query = `
+    SELECT * FROM voice_transcripts
+    WHERE session_id = $1 AND player_id = $2
+    ORDER BY timestamp ASC
+  `;
+
+  try {
+    const result = await pool.query(query, [sessionId, playerId]);
+    return result.rows;
+  } catch (error) {
+    console.error('[DB] Error getting transcripts by player:', error);
+    throw error;
+  }
+}
+
+/**
+ * Saves a player summary to the transcript_analysis table
+ * @param {string} sessionId - The session UUID
+ * @param {string} playerId - The player's UUID
+ * @param {Object} summaryData - The summary data object
+ * @returns {Promise<Object>} Saved analysis record
+ */
+async function savePlayerSummary(sessionId, playerId, summaryData) {
+  const query = `
+    INSERT INTO transcript_analysis (session_id, analysis_type, analysis_result)
+    VALUES ($1, $2, $3)
+    RETURNING *
+  `;
+
+  try {
+    const analysisResult = {
+      playerId,
+      ...summaryData,
+      generatedAt: new Date().toISOString(),
+    };
+
+    const result = await pool.query(query, [
+      sessionId,
+      'player_summary',
+      JSON.stringify(analysisResult),
+    ]);
+
+    console.log(`[DB] Saved player summary for session: ${sessionId}, player: ${playerId}`);
+    return result.rows[0];
+  } catch (error) {
+    console.error('[DB] Error saving player summary:', error);
+    throw error;
+  }
+}
+
+/**
+ * Retrieves all player summaries for a game session
+ * @param {string} sessionId - The session UUID
+ * @returns {Promise<Object>} Map of playerId to summary data
+ */
+async function getPlayerSummaries(sessionId) {
+  const query = `
+    SELECT * FROM transcript_analysis
+    WHERE session_id = $1 AND analysis_type = 'player_summary'
+    ORDER BY created_at DESC
+  `;
+
+  try {
+    const result = await pool.query(query, [sessionId]);
+
+    // Convert to map of playerId -> summary
+    const summariesMap = {};
+    result.rows.forEach(row => {
+      const analysisResult = typeof row.analysis_result === 'string'
+        ? JSON.parse(row.analysis_result)
+        : row.analysis_result;
+
+      if (analysisResult.playerId) {
+        summariesMap[analysisResult.playerId] = analysisResult;
+      }
+    });
+
+    return summariesMap;
+  } catch (error) {
+    console.error('[DB] Error getting player summaries:', error);
+    throw error;
+  }
+}
+
+/**
  * Closes the database connection pool
  */
 async function closePool() {
@@ -274,8 +365,11 @@ module.exports = {
   endGameSession,
   saveTranscripts,
   getTranscripts,
+  getTranscriptsByPlayer,
   saveAnalysis,
   getAnalysis,
+  savePlayerSummary,
+  getPlayerSummaries,
   getSessionByRoomId,
   closePool,
 };

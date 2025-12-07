@@ -10,7 +10,8 @@ const { initializeRedis, getRedisClient, closeRedis } = require('./utils/redisCl
 const sessionManager = require('./utils/sessionManager');
 const roomManager = require('./utils/roomManager');
 const { createDailyRoom, deleteDailyRoom, getDailyTranscripts, startRecording, createMeetingToken } = require('./utils/dailyManager');
-const { createGameSession, endGameSession, saveTranscripts, getSessionByRoomId } = require('./utils/dbClient');
+const { createGameSession, endGameSession, saveTranscripts, getSessionByRoomId, savePlayerSummary } = require('./utils/dbClient');
+const { generateAllPlayerSummaries } = require('./utils/aiSummaryService');
 const authController = require('./utils/authController');
 const sheetsManager = require('./utils/sheetsManager');
 
@@ -2755,6 +2756,40 @@ io.on('connection', async (socket) => {
                   sessionId: room.sessionId,
                   count: savedCount.length,
                 });
+
+                // Generate AI summaries for all players
+                console.log('[AI Summary] Starting summary generation for all players...');
+                try {
+                  // Get player list from room
+                  const players = Object.keys(room.players).map(playerId => ({
+                    id: playerId,
+                    name: room.players[playerId].name,
+                  }));
+
+                  // Generate summaries in parallel
+                  const summaries = await generateAllPlayerSummaries(room.sessionId, players);
+
+                  // Save summaries to database
+                  for (const [playerId, summary] of Object.entries(summaries)) {
+                    await savePlayerSummary(room.sessionId, playerId, summary);
+                  }
+
+                  // Emit summaries to all clients
+                  io.to(data.roomId).emit('player-summaries-ready', {
+                    sessionId: room.sessionId,
+                    summaries: summaries,
+                  });
+
+                  console.log(`[AI Summary] Successfully generated and sent summaries for ${Object.keys(summaries).length} players`);
+                } catch (summaryError) {
+                  console.error('[AI Summary] Error generating player summaries:', summaryError);
+
+                  // Emit error event but don't block the flow
+                  io.to(data.roomId).emit('player-summaries-error', {
+                    sessionId: room.sessionId,
+                    message: 'Failed to generate AI summaries',
+                  });
+                }
               } else {
                 console.warn(`[Voice Chat] No transcripts returned for room: ${room.dailyRoomName}`);
 
