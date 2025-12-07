@@ -99,6 +99,8 @@ async function saveTranscripts(sessionId, transcripts) {
     return [];
   }
 
+  console.log(`[DB] Attempting to save ${transcripts.length} transcripts for session: ${sessionId}`);
+
   const query = `
     INSERT INTO voice_transcripts (
       session_id, player_id, player_name, transcript_text,
@@ -111,25 +113,47 @@ async function saveTranscripts(sessionId, transcripts) {
   try {
     const savedTranscripts = [];
 
-    for (const transcript of transcripts) {
+    for (let i = 0; i < transcripts.length; i++) {
+      const transcript = transcripts[i];
+
+      // Debug log each transcript being processed
+      console.log(`[DB] Processing transcript ${i + 1}/${transcripts.length}:`, JSON.stringify(transcript, null, 2));
+
+      // Try multiple field name variations
+      const userId = transcript.userId || transcript.user_id || transcript.participantId || transcript.participant_id || null;
+      const userName = transcript.userName || transcript.user_name || transcript.participantName || transcript.participant_name || 'Unknown';
+      const text = transcript.text || transcript.transcript || transcript.content || '';
+      const timestamp = transcript.timestamp || transcript.ts || transcript.time || Date.now() / 1000;
+      const startTime = transcript.startTime || transcript.start_time || transcript.start || null;
+      const duration = transcript.duration || transcript.duration_seconds || (transcript.end && transcript.start ? transcript.end - transcript.start : null);
+      const confidence = transcript.confidence || null;
+
+      console.log(`[DB] Mapped fields - userId: ${userId}, userName: ${userName}, text: ${text?.substring(0, 50)}...`);
+
+      if (!text) {
+        console.warn(`[DB] Skipping transcript ${i + 1} - no text content found`);
+        continue;
+      }
+
       const result = await pool.query(query, [
         sessionId,
-        transcript.userId || null,
-        transcript.userName || 'Unknown',
-        transcript.text,
-        new Date(transcript.timestamp * 1000), // Convert Unix timestamp to Date
-        transcript.startTime || null,
-        transcript.duration || null,
-        transcript.confidence || null,
+        userId,
+        userName,
+        text,
+        new Date(timestamp * 1000), // Convert Unix timestamp to Date
+        startTime,
+        duration,
+        confidence,
       ]);
 
       savedTranscripts.push(result.rows[0]);
     }
 
-    console.log(`[DB] Saved ${savedTranscripts.length} transcripts for session: ${sessionId}`);
+    console.log(`[DB] Successfully saved ${savedTranscripts.length} transcripts for session: ${sessionId}`);
     return savedTranscripts;
   } catch (error) {
     console.error('[DB] Error saving transcripts:', error);
+    console.error('[DB] Error details:', error.message);
     throw error;
   }
 }
@@ -237,6 +261,97 @@ async function getSessionByRoomId(roomId) {
 }
 
 /**
+ * Retrieves transcripts for a specific player in a game session
+ * @param {string} sessionId - The session UUID
+ * @param {string} playerId - The player's UUID
+ * @returns {Promise<Array>} Array of transcript records for the player
+ */
+async function getTranscriptsByPlayer(sessionId, playerId) {
+  const query = `
+    SELECT * FROM voice_transcripts
+    WHERE session_id = $1 AND player_id = $2
+    ORDER BY timestamp ASC
+  `;
+
+  try {
+    const result = await pool.query(query, [sessionId, playerId]);
+    return result.rows;
+  } catch (error) {
+    console.error('[DB] Error getting transcripts by player:', error);
+    throw error;
+  }
+}
+
+/**
+ * Saves a player summary to the transcript_analysis table
+ * @param {string} sessionId - The session UUID
+ * @param {string} playerId - The player's UUID
+ * @param {Object} summaryData - The summary data object
+ * @returns {Promise<Object>} Saved analysis record
+ */
+async function savePlayerSummary(sessionId, playerId, summaryData) {
+  const query = `
+    INSERT INTO transcript_analysis (session_id, analysis_type, analysis_result)
+    VALUES ($1, $2, $3)
+    RETURNING *
+  `;
+
+  try {
+    const analysisResult = {
+      playerId,
+      ...summaryData,
+      generatedAt: new Date().toISOString(),
+    };
+
+    const result = await pool.query(query, [
+      sessionId,
+      'player_summary',
+      JSON.stringify(analysisResult),
+    ]);
+
+    console.log(`[DB] Saved player summary for session: ${sessionId}, player: ${playerId}`);
+    return result.rows[0];
+  } catch (error) {
+    console.error('[DB] Error saving player summary:', error);
+    throw error;
+  }
+}
+
+/**
+ * Retrieves all player summaries for a game session
+ * @param {string} sessionId - The session UUID
+ * @returns {Promise<Object>} Map of playerId to summary data
+ */
+async function getPlayerSummaries(sessionId) {
+  const query = `
+    SELECT * FROM transcript_analysis
+    WHERE session_id = $1 AND analysis_type = 'player_summary'
+    ORDER BY created_at DESC
+  `;
+
+  try {
+    const result = await pool.query(query, [sessionId]);
+
+    // Convert to map of playerId -> summary
+    const summariesMap = {};
+    result.rows.forEach(row => {
+      const analysisResult = typeof row.analysis_result === 'string'
+        ? JSON.parse(row.analysis_result)
+        : row.analysis_result;
+
+      if (analysisResult.playerId) {
+        summariesMap[analysisResult.playerId] = analysisResult;
+      }
+    });
+
+    return summariesMap;
+  } catch (error) {
+    console.error('[DB] Error getting player summaries:', error);
+    throw error;
+  }
+}
+
+/**
  * Closes the database connection pool
  */
 async function closePool() {
@@ -250,8 +365,11 @@ module.exports = {
   endGameSession,
   saveTranscripts,
   getTranscripts,
+  getTranscriptsByPlayer,
   saveAnalysis,
   getAnalysis,
+  savePlayerSummary,
+  getPlayerSummaries,
   getSessionByRoomId,
   closePool,
 };

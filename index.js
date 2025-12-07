@@ -9,8 +9,9 @@ const { v4: uuidv4 } = require('uuid');
 const { initializeRedis, getRedisClient, closeRedis } = require('./utils/redisClient');
 const sessionManager = require('./utils/sessionManager');
 const roomManager = require('./utils/roomManager');
-const { createDailyRoom, deleteDailyRoom, getDailyTranscripts, startRecording } = require('./utils/dailyManager');
-const { createGameSession, endGameSession, saveTranscripts, getSessionByRoomId } = require('./utils/dbClient');
+const { createDailyRoom, deleteDailyRoom, getDailyTranscripts, startRecording, createMeetingToken } = require('./utils/dailyManager');
+const { createGameSession, endGameSession, saveTranscripts, getSessionByRoomId, savePlayerSummary } = require('./utils/dbClient');
+const { generateAllPlayerSummaries } = require('./utils/aiSummaryService');
 const authController = require('./utils/authController');
 const sheetsManager = require('./utils/sheetsManager');
 
@@ -2085,6 +2086,28 @@ io.on('connection', async (socket) => {
         // Continue without voice chat if creation fails
       }
 
+      // Create meeting tokens for each player to ensure proper participant ID mapping
+      const playerTokens = {};
+      if (dailyRoomData) {
+        for (const pid of room.players) {
+          const player = players.get(pid);
+          if (player && !player.isBot) {
+            try {
+              const token = await createMeetingToken(
+                dailyRoomData.name,
+                player.name,
+                pid
+              );
+              playerTokens[pid] = token;
+              console.log(`[Voice Chat] Created meeting token for player ${player.name} (${pid})`);
+            } catch (tokenError) {
+              console.error(`[Voice Chat] Error creating token for player ${pid}:`, tokenError);
+              // Continue without token - player can still join with URL
+            }
+          }
+        }
+      }
+
       io.to(roomId).emit('game-started', {
         ...room,
         turnOrder: turnOrderWithNames,
@@ -2096,6 +2119,7 @@ io.on('connection', async (socket) => {
         voiceChat: dailyRoomData ? {
           url: dailyRoomData.url,
           roomName: dailyRoomData.name,
+          tokens: playerTokens, // Player-specific tokens for proper ID mapping
         } : null,
       });
 
@@ -2708,32 +2732,96 @@ io.on('connection', async (socket) => {
           }
         }
 
-        // Schedule transcript retrieval (Daily needs time to process)
-        if (room.dailyRoomName) {
-          console.log(`[Voice Chat] Scheduling transcript retrieval for room: ${room.dailyRoomName}`);
+        // Schedule transcript retrieval with polling (Daily needs time to process)
+        if (room.dailyRoomName && room.sessionId) {
+          console.log(`[Voice Chat] Starting transcript retrieval process for room: ${room.dailyRoomName}`);
 
-          setTimeout(async () => {
+          // Run transcript retrieval asynchronously (don't block game end)
+          (async () => {
             try {
-              const transcripts = await getDailyTranscripts(room.dailyRoomName);
+              // Wait a short initial delay to let Daily start processing
+              await new Promise(resolve => setTimeout(resolve, 30000)); // 30 seconds initial wait
 
-              if (transcripts && transcripts.length > 0 && room.sessionId) {
-                await saveTranscripts(room.sessionId, transcripts);
-                console.log(`[Voice Chat] Saved ${transcripts.length} transcripts for session: ${room.sessionId}`);
+              console.log(`[Voice Chat] Beginning transcript polling for room: ${room.dailyRoomName}`);
+
+              // Poll with retries (max 5 minutes, check every 30 seconds)
+              const transcripts = await getDailyTranscripts(room.dailyRoomName, 5 * 60 * 1000, 30000);
+
+              if (transcripts && transcripts.length > 0) {
+                const savedCount = await saveTranscripts(room.sessionId, transcripts);
+                console.log(`[Voice Chat] Successfully saved ${savedCount.length} transcripts for session: ${room.sessionId}`);
 
                 // Notify players that transcripts are ready
                 io.to(data.roomId).emit('transcripts-ready', {
                   sessionId: room.sessionId,
-                  count: transcripts.length,
+                  count: savedCount.length,
+                });
+
+                // Generate AI summaries for all players
+                console.log('[AI Summary] Starting summary generation for all players...');
+                try {
+                  // Get player list from room
+                  const players = Object.keys(room.players).map(playerId => ({
+                    id: playerId,
+                    name: room.players[playerId].name,
+                  }));
+
+                  // Generate summaries in parallel
+                  const summaries = await generateAllPlayerSummaries(room.sessionId, players);
+
+                  // Save summaries to database
+                  for (const [playerId, summary] of Object.entries(summaries)) {
+                    await savePlayerSummary(room.sessionId, playerId, summary);
+                  }
+
+                  // Emit summaries to all clients
+                  io.to(data.roomId).emit('player-summaries-ready', {
+                    sessionId: room.sessionId,
+                    summaries: summaries,
+                  });
+
+                  console.log(`[AI Summary] Successfully generated and sent summaries for ${Object.keys(summaries).length} players`);
+                } catch (summaryError) {
+                  console.error('[AI Summary] Error generating player summaries:', summaryError);
+
+                  // Emit error event but don't block the flow
+                  io.to(data.roomId).emit('player-summaries-error', {
+                    sessionId: room.sessionId,
+                    message: 'Failed to generate AI summaries',
+                  });
+                }
+              } else {
+                console.warn(`[Voice Chat] No transcripts returned for room: ${room.dailyRoomName}`);
+
+                // Notify players that transcripts failed
+                io.to(data.roomId).emit('transcripts-error', {
+                  sessionId: room.sessionId,
+                  message: 'No transcripts available',
                 });
               }
 
-              // Clean up Daily room
+              // Clean up Daily room after successful transcript retrieval
               await deleteDailyRoom(room.dailyRoomName);
               console.log(`[Voice Chat] Deleted Daily room: ${room.dailyRoomName}`);
             } catch (error) {
               console.error('[Voice Chat] Error retrieving transcripts:', error);
+              console.error('[Voice Chat] Error stack:', error.stack);
+
+              // Notify players that transcripts failed
+              io.to(data.roomId).emit('transcripts-error', {
+                sessionId: room.sessionId,
+                message: error.message,
+              });
+
+              // Still try to clean up the Daily room even if transcripts failed
+              try {
+                await deleteDailyRoom(room.dailyRoomName);
+                console.log(`[Voice Chat] Deleted Daily room after error: ${room.dailyRoomName}`);
+              } catch (deleteError) {
+                console.error('[Voice Chat] Failed to delete Daily room:', deleteError);
+              }
             }
-          }, 120000); // Wait 2 minutes for Daily to process transcripts
+          })();
         }
       } else {
         socket.emit('group-summary-error', 'Failed to generate group summary');
