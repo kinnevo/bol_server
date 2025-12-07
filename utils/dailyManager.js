@@ -111,63 +111,106 @@ async function deleteDailyRoom(roomName) {
 }
 
 /**
- * Gets transcription data from a Daily.co room
+ * Helper function to sleep for specified milliseconds
+ * @param {number} ms - Milliseconds to sleep
+ * @returns {Promise<void>}
+ */
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Gets transcription data from a Daily.co room with polling
  * @param {string} roomName - The Daily room name
+ * @param {number} maxWaitTime - Maximum time to wait in milliseconds (default: 5 minutes)
+ * @param {number} pollInterval - How often to check in milliseconds (default: 30 seconds)
  * @returns {Promise<Array>} Array of transcript objects
  */
-async function getDailyTranscripts(roomName) {
+async function getDailyTranscripts(roomName, maxWaitTime = 5 * 60 * 1000, pollInterval = 30000) {
   if (!DAILY_API_KEY) {
     throw new Error('DAILY_API_KEY is not configured');
   }
 
-  try {
-    // First, get the room's recordings
-    const recordingsResponse = await fetch(
-      `${DAILY_API_BASE_URL}/recordings?room_name=${roomName}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${DAILY_API_KEY}`,
-        },
+  const startTime = Date.now();
+  let attempt = 0;
+
+  while (Date.now() - startTime < maxWaitTime) {
+    attempt++;
+    console.log(`[Daily] Attempt ${attempt} to fetch transcripts for room: ${roomName}`);
+
+    try {
+      // First, get the room's recordings
+      const recordingsResponse = await fetch(
+        `${DAILY_API_BASE_URL}/recordings?room_name=${roomName}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${DAILY_API_KEY}`,
+          },
+        }
+      );
+
+      if (!recordingsResponse.ok) {
+        throw new Error('Failed to fetch recordings');
       }
-    );
 
-    if (!recordingsResponse.ok) {
-      throw new Error('Failed to fetch recordings');
+      const recordingsData = await recordingsResponse.json();
+
+      if (!recordingsData.data || recordingsData.data.length === 0) {
+        console.log(`[Daily] No recordings found for room: ${roomName}, will retry...`);
+        await sleep(pollInterval);
+        continue;
+      }
+
+      // Get the most recent recording
+      const recording = recordingsData.data[0];
+      console.log(`[Daily] Recording found. Transcription status: ${recording.transcription?.status || 'none'}`);
+
+      // Check if transcription is available
+      if (!recording.transcription || recording.transcription.status !== 'finished') {
+        const timeElapsed = Math.round((Date.now() - startTime) / 1000);
+        console.log(`[Daily] Transcription not ready (status: ${recording.transcription?.status || 'none'}). Waited ${timeElapsed}s, will retry...`);
+        await sleep(pollInterval);
+        continue;
+      }
+
+      // Fetch the transcription data
+      const transcriptUrl = recording.transcription.url;
+      console.log(`[Daily] Fetching transcript from: ${transcriptUrl}`);
+
+      const transcriptResponse = await fetch(transcriptUrl);
+
+      if (!transcriptResponse.ok) {
+        throw new Error('Failed to fetch transcript data');
+      }
+
+      const transcriptData = await transcriptResponse.json();
+
+      console.log(`[Daily] Retrieved transcripts for room: ${roomName}`);
+      console.log('[Daily] Raw transcript data structure:', JSON.stringify(transcriptData, null, 2));
+      console.log('[Daily] Transcript data type:', typeof transcriptData);
+      console.log('[Daily] Is array:', Array.isArray(transcriptData));
+
+      // Log first item if it's an array
+      if (Array.isArray(transcriptData) && transcriptData.length > 0) {
+        console.log('[Daily] First transcript item:', JSON.stringify(transcriptData[0], null, 2));
+      }
+
+      return transcriptData;
+    } catch (error) {
+      console.error(`[Daily] Error on attempt ${attempt}:`, error.message);
+
+      // If we haven't exceeded max wait time, retry
+      if (Date.now() - startTime < maxWaitTime) {
+        console.log(`[Daily] Will retry in ${pollInterval / 1000} seconds...`);
+        await sleep(pollInterval);
+      } else {
+        throw error;
+      }
     }
-
-    const recordingsData = await recordingsResponse.json();
-
-    if (!recordingsData.data || recordingsData.data.length === 0) {
-      console.log(`[Daily] No recordings found for room: ${roomName}`);
-      return [];
-    }
-
-    // Get the most recent recording
-    const recording = recordingsData.data[0];
-
-    // Check if transcription is available
-    if (!recording.transcription || !recording.transcription.status === 'finished') {
-      console.log(`[Daily] Transcription not ready for room: ${roomName}`);
-      return [];
-    }
-
-    // Fetch the transcription data
-    const transcriptUrl = recording.transcription.url;
-    const transcriptResponse = await fetch(transcriptUrl);
-
-    if (!transcriptResponse.ok) {
-      throw new Error('Failed to fetch transcript data');
-    }
-
-    const transcriptData = await transcriptResponse.json();
-
-    console.log(`[Daily] Retrieved transcripts for room: ${roomName}`);
-
-    return transcriptData;
-  } catch (error) {
-    console.error(`[Daily] Error getting transcripts for ${roomName}:`, error);
-    throw error;
   }
+
+  // Timeout reached
+  throw new Error(`Timeout: Transcripts not ready after ${maxWaitTime / 1000} seconds`);
 }
 
 /**

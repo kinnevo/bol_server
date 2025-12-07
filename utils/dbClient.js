@@ -99,6 +99,8 @@ async function saveTranscripts(sessionId, transcripts) {
     return [];
   }
 
+  console.log(`[DB] Attempting to save ${transcripts.length} transcripts for session: ${sessionId}`);
+
   const query = `
     INSERT INTO voice_transcripts (
       session_id, player_id, player_name, transcript_text,
@@ -111,25 +113,47 @@ async function saveTranscripts(sessionId, transcripts) {
   try {
     const savedTranscripts = [];
 
-    for (const transcript of transcripts) {
+    for (let i = 0; i < transcripts.length; i++) {
+      const transcript = transcripts[i];
+
+      // Debug log each transcript being processed
+      console.log(`[DB] Processing transcript ${i + 1}/${transcripts.length}:`, JSON.stringify(transcript, null, 2));
+
+      // Try multiple field name variations
+      const userId = transcript.userId || transcript.user_id || transcript.participantId || transcript.participant_id || null;
+      const userName = transcript.userName || transcript.user_name || transcript.participantName || transcript.participant_name || 'Unknown';
+      const text = transcript.text || transcript.transcript || transcript.content || '';
+      const timestamp = transcript.timestamp || transcript.ts || transcript.time || Date.now() / 1000;
+      const startTime = transcript.startTime || transcript.start_time || transcript.start || null;
+      const duration = transcript.duration || transcript.duration_seconds || (transcript.end && transcript.start ? transcript.end - transcript.start : null);
+      const confidence = transcript.confidence || null;
+
+      console.log(`[DB] Mapped fields - userId: ${userId}, userName: ${userName}, text: ${text?.substring(0, 50)}...`);
+
+      if (!text) {
+        console.warn(`[DB] Skipping transcript ${i + 1} - no text content found`);
+        continue;
+      }
+
       const result = await pool.query(query, [
         sessionId,
-        transcript.userId || null,
-        transcript.userName || 'Unknown',
-        transcript.text,
-        new Date(transcript.timestamp * 1000), // Convert Unix timestamp to Date
-        transcript.startTime || null,
-        transcript.duration || null,
-        transcript.confidence || null,
+        userId,
+        userName,
+        text,
+        new Date(timestamp * 1000), // Convert Unix timestamp to Date
+        startTime,
+        duration,
+        confidence,
       ]);
 
       savedTranscripts.push(result.rows[0]);
     }
 
-    console.log(`[DB] Saved ${savedTranscripts.length} transcripts for session: ${sessionId}`);
+    console.log(`[DB] Successfully saved ${savedTranscripts.length} transcripts for session: ${sessionId}`);
     return savedTranscripts;
   } catch (error) {
     console.error('[DB] Error saving transcripts:', error);
+    console.error('[DB] Error details:', error.message);
     throw error;
   }
 }
