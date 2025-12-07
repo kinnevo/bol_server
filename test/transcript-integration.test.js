@@ -232,11 +232,11 @@ async function testTranscriptPolling() {
 
   console.log('Test 3.1: Testing polling with non-existent room...');
 
+  const roomName = 'non-existent-room-' + Date.now();
+  const startTime = Date.now();
+
   try {
     // This should timeout and throw an error
-    const roomName = 'non-existent-room-' + Date.now();
-    const startTime = Date.now();
-
     // Set a short timeout for testing (10 seconds, 5 second poll interval)
     await getDailyTranscripts(roomName, 10000, 5000);
 
