@@ -34,10 +34,15 @@ function log(color, message) {
   console.log(color + message + colors.reset);
 }
 
+// Generate test UUIDs
+const testPlayer1Id = uuidv4();
+const testPlayer2Id = uuidv4();
+const testPlayer3Id = uuidv4();
+
 // Mock transcript data
 const mockTranscripts = [
   {
-    userId: 'test-player-1',
+    userId: testPlayer1Id,
     userName: 'TestPlayer',
     text: 'I\'ve been thinking a lot about changing careers. I feel stuck in my current job and want to explore something that truly excites me.',
     timestamp: Date.now() / 1000,
@@ -46,7 +51,7 @@ const mockTranscripts = [
     confidence: 0.95,
   },
   {
-    userId: 'test-player-1',
+    userId: testPlayer1Id,
     userName: 'TestPlayer',
     text: 'What makes me feel alive is creating things with my hands. I used to love woodworking but gave it up years ago.',
     timestamp: (Date.now() / 1000) + 10,
@@ -55,7 +60,7 @@ const mockTranscripts = [
     confidence: 0.92,
   },
   {
-    userId: 'test-player-1',
+    userId: testPlayer1Id,
     userName: 'TestPlayer',
     text: 'I think I\'m afraid of failing if I try something new. But staying where I am feels like a slower kind of failure.',
     timestamp: (Date.now() / 1000) + 20,
@@ -147,7 +152,7 @@ async function runIntegrationTests() {
     try {
       log(colors.blue, '📝 Test 4: Retrieve transcripts for specific player');
 
-      const playerTranscripts = await getTranscriptsByPlayer(sessionId, 'test-player-1');
+      const playerTranscripts = await getTranscriptsByPlayer(sessionId, testPlayer1Id);
 
       if (!playerTranscripts || playerTranscripts.length === 0) {
         throw new Error('No transcripts retrieved for player');
@@ -157,7 +162,7 @@ async function runIntegrationTests() {
         throw new Error(`Expected ${mockTranscripts.length} transcripts, got ${playerTranscripts.length}`);
       }
 
-      log(colors.green, `✓ Retrieved ${playerTranscripts.length} transcripts for test-player-1`);
+      log(colors.green, `✓ Retrieved ${playerTranscripts.length} transcripts for player`);
       log(colors.green, `✓ First transcript: "${playerTranscripts[0].transcript_text.substring(0, 50)}..."\n`);
       passedTests++;
     } catch (error) {
@@ -171,7 +176,7 @@ async function runIntegrationTests() {
       log(colors.yellow, '⏳ This may take 10-30 seconds...\n');
 
       const startTime = Date.now();
-      const summary = await generatePlayerSummary(sessionId, 'test-player-1', 'TestPlayer');
+      const summary = await generatePlayerSummary(sessionId, testPlayer1Id, 'TestPlayer');
       const duration = ((Date.now() - startTime) / 1000).toFixed(2);
 
       // Validate summary structure
@@ -227,7 +232,7 @@ async function runIntegrationTests() {
         throw new Error('No summary available from previous test');
       }
 
-      const savedSummary = await savePlayerSummary(sessionId, 'test-player-1', global.testSummary);
+      const savedSummary = await savePlayerSummary(sessionId, testPlayer1Id, global.testSummary);
 
       if (!savedSummary || !savedSummary.id) {
         throw new Error('Summary save failed');
@@ -251,18 +256,18 @@ async function runIntegrationTests() {
         throw new Error('Failed to retrieve summaries');
       }
 
-      if (!summaries['test-player-1']) {
+      if (!summaries[testPlayer1Id]) {
         throw new Error('Player summary not found in results');
       }
 
-      const retrievedSummary = summaries['test-player-1'];
+      const retrievedSummary = summaries[testPlayer1Id];
 
       if (!retrievedSummary.commonTopics || !retrievedSummary.narrative) {
         throw new Error('Retrieved summary missing expected fields');
       }
 
       log(colors.green, '✓ Successfully retrieved summaries');
-      log(colors.green, `✓ Found summary for test-player-1`);
+      log(colors.green, `✓ Found summary for player`);
       log(colors.green, `✓ Summary has all required fields\n`);
       passedTests++;
     } catch (error) {
@@ -278,22 +283,22 @@ async function runIntegrationTests() {
       // Add transcripts for 2 more test players
       const player2Transcripts = mockTranscripts.map(t => ({
         ...t,
-        userId: 'test-player-2',
+        userId: testPlayer2Id,
         userName: 'Player2'
       }));
 
       const player3Transcripts = mockTranscripts.map(t => ({
         ...t,
-        userId: 'test-player-3',
+        userId: testPlayer3Id,
         userName: 'Player3'
       }));
 
       await saveTranscripts(sessionId, [...player2Transcripts, ...player3Transcripts]);
 
       const players = [
-        { id: 'test-player-1', name: 'TestPlayer' },
-        { id: 'test-player-2', name: 'Player2' },
-        { id: 'test-player-3', name: 'Player3' },
+        { id: testPlayer1Id, name: 'TestPlayer' },
+        { id: testPlayer2Id, name: 'Player2' },
+        { id: testPlayer3Id, name: 'Player3' },
       ];
 
       const startTime = Date.now();
