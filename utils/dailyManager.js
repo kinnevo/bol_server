@@ -50,6 +50,13 @@ async function createDailyRoom(roomId, players) {
           // Enable recording and transcription
           enable_recording: 'cloud',
           enable_transcription: true,
+
+          // Skip pre-join UI for auto-join experience
+          enable_prejoin_ui: false,
+
+          // Start with video off, audio on
+          start_video_off: true,
+          start_audio_off: false,
         },
       }),
     });
