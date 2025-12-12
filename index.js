@@ -27,7 +27,7 @@ const io = socketIo(server, {
         /\.up\.railway\.app$/,
         /\.railway\.app$/
       ]
-      : ["http://localhost:3000", "http://localhost:3001"],
+      : ["http://localhost:3000", "http://localhost:3001", "http://localhost:3002"],
     methods: ["GET", "POST"],
     credentials: true
   }
@@ -42,7 +42,7 @@ app.use(cors({
       /\.up\.railway\.app$/,
       /\.railway\.app$/
     ]
-    : ["http://localhost:3000", "http://localhost:3001"],
+    : ["http://localhost:3000", "http://localhost:3001", "http://localhost:3002"],
   credentials: true
 }));
 app.use(express.json());
@@ -995,105 +995,13 @@ async function endGame(roomId, winnerId, io, rooms, players) {
   // Update room list to hide finished game from lobby
   io.emit('room-list-updated', getRoomsForBroadcast());
 
-  // Start transcript retrieval and AI summary generation asynchronously
-  // This runs in the background while players view the leaderboard
-  if (room.dailyRoomName && room.sessionId) {
-    console.log(`[Voice Chat] Starting transcript retrieval process for room: ${room.dailyRoomName}`);
-
-    // Run transcript retrieval asynchronously (don't block game end)
-    (async () => {
-      try {
-        // Wait initial delay to let Daily.co process transcripts
-        console.log('[Voice Chat] Waiting 30 seconds for Daily.co to process transcripts...');
-        await new Promise(resolve => setTimeout(resolve, 30000));
-
-        console.log(`[Voice Chat] Beginning transcript polling for room: ${room.dailyRoomName}`);
-
-        // Poll with retries (max 5 minutes, check every 30 seconds)
-        const transcripts = await getDailyTranscripts(room.dailyRoomName, 5 * 60 * 1000, 30000);
-
-        if (transcripts && transcripts.length > 0) {
-          const savedCount = await saveTranscripts(room.sessionId, transcripts);
-          console.log(`[Voice Chat] Successfully saved ${savedCount.length} transcripts for session: ${room.sessionId}`);
-
-          // Notify players that transcripts are ready
-          io.to(roomId).emit('transcripts-ready', {
-            sessionId: room.sessionId,
-            count: savedCount.length,
-          });
-
-          // Generate AI summaries for all players
-          console.log('[AI Summary] Starting summary generation for all players...');
-          try {
-            // Get player list from room - room.players is an ARRAY of player IDs
-            const playerList = room.players.map(playerId => {
-              const player = players.get(playerId);
-              return {
-                id: playerId,
-                name: player ? player.name : 'Unknown',
-              };
-            });
-
-            console.log(`[AI Summary] Generating summaries for ${playerList.length} players:`, playerList.map(p => p.name));
-
-            // Generate summaries in parallel
-            const summaries = await generateAllPlayerSummaries(room.sessionId, playerList);
-
-            // Save summaries to database
-            for (const [playerId, summary] of Object.entries(summaries)) {
-              await savePlayerSummary(room.sessionId, playerId, summary);
-            }
-
-            // Emit summaries to all clients
-            io.to(roomId).emit('player-summaries-ready', {
-              sessionId: room.sessionId,
-              summaries: summaries,
-            });
-
-            console.log(`[AI Summary] Successfully generated and sent summaries for ${Object.keys(summaries).length} players`);
-          } catch (summaryError) {
-            console.error('[AI Summary] Error generating player summaries:', summaryError);
-
-            // Emit error event but don't block the flow
-            io.to(roomId).emit('player-summaries-error', {
-              sessionId: room.sessionId,
-              message: 'Failed to generate AI summaries',
-            });
-          }
-        } else {
-          console.warn(`[Voice Chat] No transcripts returned for room: ${room.dailyRoomName}`);
-
-          // Notify players that transcripts failed - they can still see leaderboard
-          io.to(roomId).emit('transcripts-error', {
-            sessionId: room.sessionId,
-            message: 'No transcripts available',
-          });
-        }
-
-        // Clean up Daily room after transcript retrieval (success or not)
-        try {
-          await deleteDailyRoom(room.dailyRoomName);
-          console.log(`[Voice Chat] Deleted Daily room: ${room.dailyRoomName}`);
-        } catch (dailyError) {
-          console.warn('Could not delete Daily.co room:', dailyError.message);
-        }
-      } catch (error) {
-        console.error('[Voice Chat] Error retrieving transcripts:', error);
-        console.error('[Voice Chat] Error stack:', error.stack);
-
-        // Notify players that transcripts failed
-        io.to(roomId).emit('transcripts-error', {
-          sessionId: room.sessionId,
-          message: error.message,
-        });
-      }
-    })();
-  }
+  // NOTE: Transcript retrieval now happens on-demand when user clicks "End Game & Get Summary"
+  // See 'request-summary' socket handler
 
   // Clean up room after extended delay to allow:
-  // - Players to see leaderboard and AI summaries
-  // - Transcript retrieval to complete (30s wait + up to 5 min polling)
-  // Total: 10 minutes should be enough
+  // - Players to see leaderboard and say goodbye via voice chat
+  // - User to request AI summary (which takes ~30s wait + polling)
+  // Total: 15 minutes should be enough for goodbyes + summary generation
   setTimeout(async () => {
     console.log(`🗑️ Cleaning up finished room: ${room.name} (${roomId})`);
 
@@ -1107,9 +1015,8 @@ async function endGame(roomId, winnerId, io, rooms, players) {
       }
     }
 
-    // Note: Daily.co room is deleted by the transcript retrieval process above
-    // Only delete here if transcript retrieval didn't run
-    if (room.dailyRoomName && !room.sessionId) {
+    // Delete Daily.co room if it wasn't already deleted by request-summary
+    if (room.dailyRoomName && !room.summaryInProgress) {
       try {
         await deleteDailyRoom(room.dailyRoomName);
         console.log(`🎙️ Deleted Daily.co room: ${room.dailyRoomName}`);
@@ -1127,7 +1034,7 @@ async function endGame(roomId, winnerId, io, rooms, players) {
     io.emit('player-list-updated', Array.from(players.values()));
 
     console.log(`✅ Room cleanup complete: ${room.name}`);
-  }, 10 * 60 * 1000); // 10 minutes delay to allow transcript retrieval and AI summary generation
+  }, 15 * 60 * 1000); // 15 minutes delay for goodbyes + summary generation
 }
 
 // Function to simulate bot conversation
@@ -2928,6 +2835,104 @@ io.on('connection', async (socket) => {
     } catch (error) {
       console.error('Error in group summary generation:', error);
       socket.emit('group-summary-error', 'An error occurred while generating the group summary');
+    }
+  });
+
+  // Handle request-summary - triggered when user clicks "End Game & Get Summary"
+  socket.on('request-summary', async (data) => {
+    console.log('[Request Summary] User requested summary for room:', data.roomId);
+
+    const room = rooms.get(data.roomId);
+    if (!room) {
+      socket.emit('transcripts-error', { message: 'Room not found' });
+      return;
+    }
+
+    // Only start transcript retrieval if not already in progress
+    if (room.summaryInProgress) {
+      console.log('[Request Summary] Summary generation already in progress');
+      return;
+    }
+
+    room.summaryInProgress = true;
+
+    // Start transcript retrieval and AI summary generation
+    if (room.dailyRoomName && room.sessionId) {
+      console.log(`[Voice Chat] Starting transcript retrieval for room: ${room.dailyRoomName}`);
+
+      (async () => {
+        try {
+          // Wait initial delay for Daily.co to process
+          console.log('[Voice Chat] Waiting 30 seconds for Daily.co to process transcripts...');
+          await new Promise(resolve => setTimeout(resolve, 30000));
+
+          console.log(`[Voice Chat] Beginning transcript polling for room: ${room.dailyRoomName}`);
+
+          // Poll with retries (max 5 minutes, check every 30 seconds)
+          const transcripts = await getDailyTranscripts(room.dailyRoomName, 5 * 60 * 1000, 30000);
+
+          if (transcripts && transcripts.length > 0) {
+            const savedCount = await saveTranscripts(room.sessionId, transcripts);
+            console.log(`[Voice Chat] Successfully saved ${savedCount.length} transcripts`);
+
+            // Notify clients
+            io.to(data.roomId).emit('transcripts-ready', {
+              sessionId: room.sessionId,
+              count: savedCount.length,
+            });
+
+            // Generate AI summaries
+            console.log('[AI Summary] Starting summary generation...');
+            try {
+              const playerList = room.players.map(pid => {
+                const player = players.get(pid);
+                return { id: pid, name: player ? player.name : 'Unknown' };
+              });
+
+              const summaries = await generateAllPlayerSummaries(room.sessionId, playerList);
+
+              for (const [pid, summary] of Object.entries(summaries)) {
+                await savePlayerSummary(room.sessionId, pid, summary);
+              }
+
+              io.to(data.roomId).emit('player-summaries-ready', {
+                sessionId: room.sessionId,
+                summaries: summaries,
+              });
+
+              console.log(`[AI Summary] Successfully generated ${Object.keys(summaries).length} summaries`);
+            } catch (summaryError) {
+              console.error('[AI Summary] Error:', summaryError);
+              io.to(data.roomId).emit('player-summaries-error', {
+                sessionId: room.sessionId,
+                message: 'Failed to generate AI summaries',
+              });
+            }
+          } else {
+            console.warn('[Voice Chat] No transcripts found');
+            io.to(data.roomId).emit('transcripts-error', {
+              sessionId: room.sessionId,
+              message: 'No voice transcripts available',
+            });
+          }
+
+          // Clean up Daily room
+          try {
+            await deleteDailyRoom(room.dailyRoomName);
+            console.log(`[Voice Chat] Deleted Daily room: ${room.dailyRoomName}`);
+          } catch (dailyError) {
+            console.warn('Could not delete Daily.co room:', dailyError.message);
+          }
+        } catch (error) {
+          console.error('[Voice Chat] Error retrieving transcripts:', error);
+          io.to(data.roomId).emit('transcripts-error', {
+            sessionId: room.sessionId,
+            message: error.message,
+          });
+        }
+      })();
+    } else {
+      socket.emit('transcripts-error', { message: 'Voice chat was not enabled for this game' });
     }
   });
 
