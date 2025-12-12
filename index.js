@@ -2862,8 +2862,18 @@ io.on('connection', async (socket) => {
 
       (async () => {
         try {
-          // Wait initial delay for Daily.co to process
-          console.log('[Voice Chat] Waiting 30 seconds for Daily.co to process transcripts...');
+          // IMPORTANT: Delete the Daily room FIRST to end the call
+          // Transcripts are only available after the call ends!
+          console.log('[Voice Chat] Ending Daily.co call to make transcripts available...');
+          try {
+            await deleteDailyRoom(room.dailyRoomName);
+            console.log(`[Voice Chat] Deleted Daily room: ${room.dailyRoomName} - call ended for all participants`);
+          } catch (dailyDeleteError) {
+            console.warn('[Voice Chat] Error deleting Daily room (may already be deleted):', dailyDeleteError.message);
+          }
+
+          // Wait for Daily.co to process the transcripts after call ends
+          console.log('[Voice Chat] Waiting 30 seconds for Daily.co to process transcripts after call ended...');
           await new Promise(resolve => setTimeout(resolve, 30000));
 
           console.log(`[Voice Chat] Beginning transcript polling for room: ${room.dailyRoomName}`);
@@ -2916,13 +2926,7 @@ io.on('connection', async (socket) => {
             });
           }
 
-          // Clean up Daily room
-          try {
-            await deleteDailyRoom(room.dailyRoomName);
-            console.log(`[Voice Chat] Deleted Daily room: ${room.dailyRoomName}`);
-          } catch (dailyError) {
-            console.warn('Could not delete Daily.co room:', dailyError.message);
-          }
+          // Note: Daily room was already deleted at the start to end the call
         } catch (error) {
           console.error('[Voice Chat] Error retrieving transcripts:', error);
           io.to(data.roomId).emit('transcripts-error', {
@@ -2933,6 +2937,143 @@ io.on('connection', async (socket) => {
       })();
     } else {
       socket.emit('transcripts-error', { message: 'Voice chat was not enabled for this game' });
+    }
+  });
+
+  // Handle play-again - restart game with same players
+  socket.on('play-again', async (data) => {
+    console.log(`[Play Again] User requested to play again in room: ${data.roomId}`);
+
+    const room = rooms.get(data.roomId);
+    if (!room) {
+      socket.emit('play-again-error', { message: 'Room not found' });
+      return;
+    }
+
+    // Only allow if game is finished
+    if (room.gamePhase !== 'finished' && room.status !== 'finished') {
+      socket.emit('play-again-error', { message: 'Game is not finished yet' });
+      return;
+    }
+
+    try {
+      // Reset game state
+      room.status = 'playing';
+      room.conversations = new Map();
+      room.finishedPlayers = [];
+      room.summaryInProgress = false;
+
+      // Re-initialize turn system
+      room.turnOrder = assignTurnOrder(room.players);
+      room.currentTurnIndex = 0;
+      room.deck = await createDeck();
+      room.drawnCards = [];
+
+      // Reset voting system state
+      room.gamePhase = 'drawing';
+      room.playerPoints = {};
+      room.players.forEach(pid => {
+        room.playerPoints[pid] = { connection: 0, wisdom: 0 };
+      });
+      room.votingState = null;
+      room.currentCard = null;
+      room.consecutiveNonInflection = 0;
+
+      console.log(`[Play Again] Game restarted with ${room.players.length} players`);
+
+      // Get player names for turn order display
+      const turnOrderWithNames = room.turnOrder.map(pid => {
+        const player = players.get(pid);
+        return {
+          id: pid,
+          name: player ? player.name : 'Unknown',
+          isBot: player ? player.isBot : false
+        };
+      });
+
+      // Create new Daily.co voice chat room
+      let dailyRoomData = null;
+      let sessionId = uuidv4();
+
+      try {
+        const playersList = room.players.map(pid => {
+          const player = players.get(pid);
+          return {
+            id: pid,
+            name: player ? player.name : 'Unknown',
+            isBot: player ? player.isBot : false
+          };
+        });
+
+        const humanPlayers = playersList.filter(p => !p.isBot);
+
+        if (humanPlayers.length > 0) {
+          console.log(`[Play Again] Creating new Daily room for ${humanPlayers.length} human players`);
+          dailyRoomData = await createDailyRoom(data.roomId, playersList);
+
+          room.dailyRoomUrl = dailyRoomData.url;
+          room.dailyRoomName = dailyRoomData.name;
+          room.sessionId = sessionId;
+
+          // Create game session in database
+          try {
+            await createGameSession({
+              id: sessionId,
+              roomId: data.roomId,
+              roomName: room.name,
+              dailyRoomName: dailyRoomData.name,
+              dailyRoomUrl: dailyRoomData.url,
+              playerCount: room.players.length,
+            });
+            console.log(`[DB] Created new game session: ${sessionId}`);
+          } catch (dbError) {
+            console.warn('[DB] Could not save session:', dbError.message);
+          }
+        }
+      } catch (error) {
+        console.error('[Play Again] Error creating Daily room:', error);
+      }
+
+      // Create meeting tokens for each player
+      const playerTokens = {};
+      if (dailyRoomData) {
+        for (const pid of room.players) {
+          const player = players.get(pid);
+          if (player && !player.isBot) {
+            try {
+              const token = await createMeetingToken(
+                dailyRoomData.name,
+                player.name,
+                pid
+              );
+              playerTokens[pid] = token;
+            } catch (tokenError) {
+              console.error(`[Play Again] Error creating token for player ${pid}:`, tokenError);
+            }
+          }
+        }
+      }
+
+      // Emit game-started to all players in the room
+      io.to(data.roomId).emit('game-started', {
+        ...room,
+        turnOrder: turnOrderWithNames,
+        currentPlayerId: room.turnOrder[0],
+        deckSize: room.deck.length,
+        gamePhase: room.gamePhase,
+        playerPoints: room.playerPoints,
+        pointThreshold: room.pointThreshold,
+        voiceChat: dailyRoomData ? {
+          url: dailyRoomData.url,
+          name: dailyRoomData.name,
+          tokens: playerTokens,
+        } : null,
+      });
+
+      console.log(`[Play Again] Emitted game-started event for room ${data.roomId}`);
+    } catch (error) {
+      console.error('[Play Again] Error restarting game:', error);
+      socket.emit('play-again-error', { message: 'Failed to restart game' });
     }
   });
 
