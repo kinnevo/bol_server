@@ -1520,6 +1520,25 @@ io.on('connection', async (socket) => {
         if (room) {
           rooms.set(existingPlayerData.currentRoom, room);
           console.log(`📥 Loaded room ${existingPlayerData.currentRoom} from Redis`);
+
+          // Also load all other players in the room from Redis into memory
+          // This prevents "Unknown" player names when reconnecting
+          for (const pid of room.players) {
+            if (!players.has(pid) && pid !== playerId) {
+              const otherPlayerData = await sessionManager.getPlayer(pid);
+              if (otherPlayerData) {
+                players.set(pid, {
+                  id: pid,
+                  name: otherPlayerData.name,
+                  room: otherPlayerData.currentRoom,
+                  windowSessionId: otherPlayerData.windowSessionId,
+                  socketId: otherPlayerData.socketId,
+                  isBot: otherPlayerData.isBot || false
+                });
+                console.log(`📥 Loaded player ${pid} (${otherPlayerData.name}) from Redis`);
+              }
+            }
+          }
         }
       }
 
@@ -1531,6 +1550,25 @@ io.on('connection', async (socket) => {
 
         // Join socket.io room
         socket.join(existingPlayerData.currentRoom);
+
+        // Ensure all players in the room are loaded into memory
+        // This handles cases where room was in memory but some players disconnected
+        for (const pid of room.players) {
+          if (!players.has(pid)) {
+            const otherPlayerData = await sessionManager.getPlayer(pid);
+            if (otherPlayerData) {
+              players.set(pid, {
+                id: pid,
+                name: otherPlayerData.name,
+                room: otherPlayerData.currentRoom,
+                windowSessionId: otherPlayerData.windowSessionId,
+                socketId: otherPlayerData.socketId,
+                isBot: otherPlayerData.isBot || false
+              });
+              console.log(`📥 Loaded missing player ${pid} (${otherPlayerData.name}) from Redis`);
+            }
+          }
+        }
 
         // Send reconnection confirmation to client
         // Build enriched room data with player names and turn order
@@ -1810,6 +1848,24 @@ io.on('connection', async (socket) => {
       // Join socket.io room
       socket.join(roomId);
 
+      // Ensure all players in the room are loaded into memory from Redis
+      for (const pid of room.players) {
+        if (!players.has(pid)) {
+          const otherPlayerData = await sessionManager.getPlayer(pid);
+          if (otherPlayerData) {
+            players.set(pid, {
+              id: pid,
+              name: otherPlayerData.name,
+              room: otherPlayerData.currentRoom,
+              windowSessionId: otherPlayerData.windowSessionId,
+              socketId: otherPlayerData.socketId,
+              isBot: otherPlayerData.isBot || false
+            });
+            console.log(`📥 Loaded missing player ${pid} (${otherPlayerData.name}) from Redis during room rejoin`);
+          }
+        }
+      }
+
       // Create room data with player names and finished players
       const playerNames = room.players.map(pid => {
         const p = players.get(pid);
@@ -1877,6 +1933,24 @@ io.on('connection', async (socket) => {
 
         // Sync room to Redis
         await syncRoomToRedis(roomId);
+
+        // Ensure all players in the room are loaded into memory from Redis
+        for (const pid of room.players) {
+          if (!players.has(pid)) {
+            const otherPlayerData = await sessionManager.getPlayer(pid);
+            if (otherPlayerData) {
+              players.set(pid, {
+                id: pid,
+                name: otherPlayerData.name,
+                room: otherPlayerData.currentRoom,
+                windowSessionId: otherPlayerData.windowSessionId,
+                socketId: otherPlayerData.socketId,
+                isBot: otherPlayerData.isBot || false
+              });
+              console.log(`📥 Loaded missing player ${pid} (${otherPlayerData.name}) from Redis during game rejoin`);
+            }
+          }
+        }
 
         // Build player names
         const playerNames = room.players.map(pid => {
@@ -1946,6 +2020,24 @@ io.on('connection', async (socket) => {
     await syncRoomToRedis(roomId);
 
     console.log('Player joined room successfully:', playerId, 'Room:', roomId, 'New player count:', room.players.length);
+
+    // Ensure all players in the room are loaded into memory from Redis
+    for (const pid of room.players) {
+      if (!players.has(pid)) {
+        const otherPlayerData = await sessionManager.getPlayer(pid);
+        if (otherPlayerData) {
+          players.set(pid, {
+            id: pid,
+            name: otherPlayerData.name,
+            room: otherPlayerData.currentRoom,
+            windowSessionId: otherPlayerData.windowSessionId,
+            socketId: otherPlayerData.socketId,
+            isBot: otherPlayerData.isBot || false
+          });
+          console.log(`📥 Loaded missing player ${pid} (${otherPlayerData.name}) from Redis during room join`);
+        }
+      }
+    }
 
     // Create room data with player names and finished players
     const playerNames = room.players.map(pid => {
