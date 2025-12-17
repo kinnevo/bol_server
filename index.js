@@ -2224,6 +2224,9 @@ io.on('connection', async (socket) => {
       // Sync room to Redis
       await syncRoomToRedis(roomId);
 
+      // Broadcast updated room list to lobby so "Join Room" becomes "In Progress"
+      io.emit('room-list-updated', getRoomsForBroadcast());
+
       // Start bot conversations automatically
       room.players.forEach(pid => {
         const player = players.get(pid);
