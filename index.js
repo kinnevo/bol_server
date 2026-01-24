@@ -10,7 +10,7 @@ const { initializeRedis, getRedisClient, closeRedis } = require('./utils/redisCl
 const sessionManager = require('./utils/sessionManager');
 const roomManager = require('./utils/roomManager');
 const { createDailyRoom, deleteDailyRoom, getDailyTranscripts, startRecording, createMeetingToken } = require('./utils/dailyManager');
-const { createGameSession, endGameSession, saveTranscripts, getSessionByRoomId, savePlayerSummary } = require('./utils/dbClient');
+const { pool, createGameSession, endGameSession, saveTranscripts, getSessionByRoomId, savePlayerSummary } = require('./utils/dbClient');
 const { generateAllPlayerSummaries } = require('./utils/aiSummaryService');
 const authController = require('./utils/authController');
 const sheetsManager = require('./utils/sheetsManager');
@@ -91,6 +91,109 @@ app.post('/admin/reset', (req, res) => {
     message: 'Server reset initiated - all clients will be disconnected',
     timestamp: new Date().toISOString()
   });
+});
+
+// Admin endpoint for full system reset (dev only - preserves users table)
+app.post('/admin/reset-all', async (req, res) => {
+  console.log('🔄 FULL system reset requested (reset-all)');
+
+  try {
+    const results = {
+      redis: false,
+      postgres: false,
+      daily: false,
+      memory: false,
+      sockets: false,
+    };
+
+    // 1. Notify all clients
+    io.emit('server-reset', { message: 'Full system reset in progress. You will be redirected to login.' });
+
+    // 2. Delete all Daily.co rooms (before clearing memory so we can read room names)
+    try {
+      const dailyRoomNames = [];
+      for (const [, room] of rooms) {
+        if (room.dailyRoomName) {
+          dailyRoomNames.push(room.dailyRoomName);
+        }
+      }
+      // Also query Daily.co API to catch orphaned rooms
+      if (process.env.DAILY_API_KEY) {
+        const dailyListResponse = await fetch('https://api.daily.co/v1/rooms', {
+          headers: { 'Authorization': `Bearer ${process.env.DAILY_API_KEY}` }
+        });
+        if (dailyListResponse.ok) {
+          const dailyData = await dailyListResponse.json();
+          if (dailyData.data) {
+            for (const room of dailyData.data) {
+              if (room.name && room.name.startsWith('bol-game-')) {
+                if (!dailyRoomNames.includes(room.name)) {
+                  dailyRoomNames.push(room.name);
+                }
+              }
+            }
+          }
+        }
+      }
+      for (const roomName of dailyRoomNames) {
+        try { await deleteDailyRoom(roomName); } catch (e) { /* continue */ }
+      }
+      results.daily = true;
+      console.log(`✅ Deleted ${dailyRoomNames.length} Daily.co rooms`);
+    } catch (err) {
+      console.error('❌ Daily.co cleanup error:', err.message);
+    }
+
+    // 3. Flush Redis
+    try {
+      const redis = getRedisClient();
+      await redis.flushDb();
+      results.redis = true;
+      console.log('✅ Redis FLUSHDB completed');
+    } catch (err) {
+      console.error('❌ Redis flush error:', err.message);
+    }
+
+    // 4. Truncate PostgreSQL tables (NOT users)
+    try {
+      await pool.query('TRUNCATE TABLE transcript_analysis, voice_transcripts, game_sessions CASCADE');
+      results.postgres = true;
+      console.log('✅ PostgreSQL tables truncated (game_sessions, voice_transcripts, transcript_analysis)');
+    } catch (err) {
+      console.error('❌ PostgreSQL truncate error:', err.message);
+    }
+
+    // 5. Clear in-memory state
+    rooms.clear();
+    players.clear();
+    io.sockets.adapter.rooms.clear();
+    results.memory = true;
+    console.log('✅ In-memory state cleared');
+
+    // 6. Disconnect all socket clients (delay for message delivery)
+    setTimeout(() => {
+      io.sockets.sockets.forEach((socket) => {
+        socket.disconnect(true);
+      });
+      console.log('✅ All socket clients disconnected');
+    }, 1000);
+    results.sockets = true;
+
+    console.log('✅ Full reset completed:', results);
+    res.json({
+      success: true,
+      message: 'Full system reset completed',
+      results,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('❌ Full reset error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Reset failed: ' + error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 // Admin endpoint to get server stats
